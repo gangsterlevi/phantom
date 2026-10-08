@@ -36,7 +36,7 @@ contains
 subroutine equationofstate_gasradrec(d,eint,T,imu,X,Y,p,cf,gamma_eff,cveff_out,do_radiation,xi)
  use ionization_mod, only:get_erec_cveff,get_imurec
  use physcon,        only:radconst,Rg
- use io,             only:fatal
+ use io,             only:fatal,warning
  real,    intent(in)    :: d,eint,X,Y
  real,    intent(inout) :: T,imu ! imu is 1/mu, an output
  real,    intent(out)   :: p,cf,gamma_eff
@@ -44,9 +44,11 @@ subroutine equationofstate_gasradrec(d,eint,T,imu,X,Y,p,cf,gamma_eff,cveff_out,d
  logical, intent(in),  optional :: do_radiation
  real,    intent(out), optional :: cveff_out
  real                :: corr,erec,derecdT,Tdot,logd,dt,Tguess,cveff,dcveffdlnT,cs2
+ real                :: T_prev,T_prev2
  logical             :: do_radiation_local
+ logical             :: use_quad,converged
  integer, parameter  :: nmax = 500
- integer n
+ integer n,ipass
 
  if (.not. present(do_radiation)) then
     do_radiation_local = .false.
@@ -54,38 +56,56 @@ subroutine equationofstate_gasradrec(d,eint,T,imu,X,Y,p,cf,gamma_eff,cveff_out,d
     do_radiation_local = do_radiation
  endif
  corr=huge(0.); Tdot=0.; logd=log10(d); dt=0.9; Tguess=T
-
- do n = 1,nmax
-    call get_erec_cveff(logd,T,X,Y,erec,cveff,derecdT,dcveffdlnT)
-    if (d*erec>=eint) then ! avoid negative thermal energy
-       T = 0.9*T; Tdot=0.;cycle
-    endif
-    if (do_radiation_local) then
-       corr = (eint-d*(Rg*cveff*T+erec)) &
-              / ( -d*(Rg*(cveff+dcveffdlnT)+derecdT) )
-    else
-       corr = (eint-(radconst*T**3+Rg*d*cveff)*T-d*erec) &
-              / ( -4.*radconst*T**3-d*(Rg*(cveff+dcveffdlnT)+derecdT) )
-    endif
-    if (-corr > 10.*T) then  ! do not let temperature guess increase by more than a factor of 1000
-       T = 10.*T
+ converged = .false.
+ use_quad = .false.
+ precision_passes: do ipass = 1,2
+    if (ipass == 2) then
+       use_quad = .true.
+       call warning('eos_gasradrec','Newton solver stalled; retrying ionization fit in quad precision')
        Tdot = 0.
-    elseif (abs(corr) > W4err*T) then
-       T = T + Tdot*dt
-       Tdot = (1.-2.*dt)*Tdot - dt*corr
-    else
-       T = T-corr*dt
-       Tdot = 0.
-       dt = 1.
+       dt = 0.9
     endif
-    if (abs(corr)<max(eoserr*T,eoserr)) exit
-    if (n>50) dt=0.5
-    if (n>100) dt=0.25
- enddo
- call get_imurec(logd,T,X,Y,imu)
- if (n > nmax) then
+    T_prev = huge(0.); T_prev2 = huge(0.)
+    do n = 1,nmax
+       if (.not.use_quad .and. n > 2 .and. (T == T_prev .or. T == T_prev2)) exit
+       T_prev2 = T_prev
+       T_prev = T
+       call get_erec_cveff(logd,T,X,Y,erec,cveff,derecdT,dcveffdlnT,use_quad=use_quad)
+       if (d*erec>=eint) then ! avoid negative thermal energy
+          T = 0.9*T; Tdot=0.;cycle
+       endif
+       if (do_radiation_local) then
+          corr = (eint-d*(Rg*cveff*T+erec)) &
+                 / ( -d*(Rg*(cveff+dcveffdlnT)+derecdT) )
+       else
+          corr = (eint-(radconst*T**3+Rg*d*cveff)*T-d*erec) &
+                 / ( -4.*radconst*T**3-d*(Rg*(cveff+dcveffdlnT)+derecdT) )
+       endif
+       if (-corr > 10.*T) then  ! do not let temperature guess increase by more than a factor of 1000
+          T = 10.*T
+          Tdot = 0.
+       elseif (abs(corr) > W4err*T) then
+          T = T + Tdot*dt
+          Tdot = (1.-2.*dt)*Tdot - dt*corr
+       else
+          T = T-corr*dt
+          Tdot = 0.
+          dt = 1.
+       endif
+       if (abs(corr)<max(eoserr*T,eoserr)) then
+          converged = .true.
+          exit
+       endif
+       if (n>50) dt=0.5
+       if (n>100) dt=0.25
+    enddo
+    if (converged) exit precision_passes
+ enddo precision_passes
+ call get_erec_cveff(logd,T,X,Y,erec,cveff,derecdT,dcveffdlnT,use_quad=use_quad)
+ call get_imurec(logd,T,X,Y,imu,use_quad=use_quad)
+ if (.not.converged) then
     print*,'d=',d,'eint=',eint/d,'Tguess=',Tguess,'mu=',1./imu,'T=',T,'erec=',erec
-    print*,'n = ',n,' nmax = ',n,' correction is ',abs(corr),' needs to be < ',eoserr*T
+    print*,'n = ',n,' nmax = ',nmax,' correction is ',abs(corr),' needs to be < ',eoserr*T
     call fatal('eos_gasradrec','Failed to converge on temperature in equationofstate_gasradrec')
  endif
  if (do_radiation_local) then
@@ -94,9 +114,9 @@ subroutine equationofstate_gasradrec(d,eint,T,imu,X,Y,p,cf,gamma_eff,cveff_out,d
     p = ( Rg*imu*d + radconst*T**3/3. )*T
  endif
  if (present(xi)) then
-    cs2 = get_cs2(d,T,X,Y,do_radiation_local,xi)  ! not used at the moment
+    cs2 = get_cs2(d,T,X,Y,do_radiation_local,xi,use_quad=use_quad)  ! not used at the moment
  else
-    cs2 = get_cs2(d,T,X,Y,do_radiation_local)
+    cs2 = get_cs2(d,T,X,Y,do_radiation_local,use_quad=use_quad)
  endif
  gamma_eff=cs2*d/p
  cf = sqrt(cs2)
@@ -109,13 +129,15 @@ end subroutine equationofstate_gasradrec
 !  To compute sound speed squared from d and T
 !+
 !-----------------------------------------------------------------------
-function get_cs2(d,T,X,Y,do_radiation,xi) result(cs2)
+function get_cs2(d,T,X,Y,do_radiation,xi,use_quad) result(cs2)
  use ionization_mod, only:get_erec_cveff,get_imurec
  use physcon,        only:radconst,Rg
  real,    intent(in) :: d,T,X,Y
  real,    intent(in), optional :: xi
  logical, intent(in), optional :: do_radiation
+ logical, intent(in), optional :: use_quad
  logical :: do_radiation_local
+ logical :: use_quad_local
  real    :: cs2
  real    :: erec,cveff,derecdT,dcveffdlnT,imurec,dimurecdlnT,dimurecdlnd
  real    :: logd,deraddT
@@ -125,10 +147,12 @@ function get_cs2(d,T,X,Y,do_radiation,xi) result(cs2)
  else
     do_radiation_local = do_radiation
  endif
+ use_quad_local = .false.
+ if (present(use_quad)) use_quad_local = use_quad
 
  logd=log10(d)
- call get_erec_cveff(logd,T,X,Y,erec,cveff,derecdT,dcveffdlnT)
- call get_imurec(logd,T,X,Y,imurec,dimurecdlnT,dimurecdlnd)
+ call get_erec_cveff(logd,T,X,Y,erec,cveff,derecdT,dcveffdlnT,use_quad=use_quad_local)
+ call get_imurec(logd,T,X,Y,imurec,dimurecdlnT,dimurecdlnd,use_quad=use_quad_local)
  if (do_radiation_local) then
     cs2 = Rg*(imurec+dimurecdlnd)*T &
           + ( Rg*(imurec+dimurecdlnT))**2*T &

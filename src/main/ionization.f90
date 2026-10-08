@@ -26,9 +26,11 @@ module ionization_mod
  real, parameter, private                 :: sigm_edge = 1.43713233658279d0, &
                                              dlog=1.e-4
  real, private :: tanh_edge
+ integer, parameter, private :: qp = selected_real_kind(33,4931)
 
  public:: cvmol
- private::rapid_tanh,rapid_dtanh,arec1,brec1,rapid_sigm,get_cveff,imurec1
+private::rapid_tanh,rapid_dtanh,rapid_tanh_qp,rapid_dtanh_qp
+private::arec1,brec1,rapid_sigm,get_cveff,imurec1
 
 contains
 
@@ -229,13 +231,26 @@ end function get_cveff
 !  Get ionization fractions (and dxdT) given rho and T
 !+
 !-----------------------------------------------------------------------
-subroutine get_xion(logd,T,Y,xion,dxion)
+subroutine get_xion(logd,T,Y,xion,dxion,use_quad)
  use io, only:fatal
  real, intent(in)  :: logd,T,Y
  real, intent(out) :: xion(1:4)
  real, intent(out), optional :: dxion(1:4)
+ logical, intent(in), optional :: use_quad
  real                        :: logQ,logT,Yfac
  real :: Ttra(1:4),width(1:4),arg(1:4)
+ logical :: use_quad_local
+
+ use_quad_local = .false.
+ if (present(use_quad)) use_quad_local = use_quad
+ if (use_quad_local) then
+    call get_xion_quad(logd,T,Y,xion,dxion)
+    if (any(xion<0.)) then
+       print*,xion
+       call fatal('ionization','negative ionization fraction')
+    endif
+    return
+ endif
 
  logT = log10(T)
  logQ = max(-14.,logd)-2.*logT+12.
@@ -253,11 +268,11 @@ subroutine get_xion(logd,T,Y,xion,dxion)
     dxion(1) = ( width(1)*(1.+2.*brec1(logd)) &
                 + 2.*crec(1)*(logT-Ttra(1))&
                   *(brec1(logd)*(1.+drec(1)*logQ)+drec(1)*Ttra(1)) )&
-              / (2.*T*width(1)*width(1)) * rapid_dtanh(arg(1))
+                     / (2.*T*log(10.)*width(1)*width(1)) * rapid_dtanh(arg(1))
     dxion(2:4) = ( width(2:4)*(1.+2.*brec(2:4)) &
                  + 2.*crec(2:4)*(logT-Ttra(2:4))&
                    *(brec(2:4)*(1.+drec(2:4)*logQ)+drec(2:4)*Ttra(2:4)) )&
-                / (2.*T*width(2:4)*width(2:4)) * rapid_dtanh(arg(2:4))
+                        / (2.*T*log(10.)*width(2:4)*width(2:4)) * rapid_dtanh(arg(2:4))
  endif
 
  if (any(xion<0)) then
@@ -267,17 +282,92 @@ subroutine get_xion(logd,T,Y,xion,dxion)
 
 end subroutine get_xion
 
+subroutine get_xion_quad(logd,T,Y,xion,dxion)
+ real,    intent(in)            :: logd,T,Y
+ real,    intent(out)           :: xion(1:4)
+ real,    intent(out), optional :: dxion(1:4)
+ real(qp) :: logd_q,T_q,Y_q,logQ,logT,Yfac
+ real(qp) :: Ttra(1:4),width(1:4),arg(1:4),xion_q(1:4),dxion_q(1:4)
+ real(qp) :: arec_q(2:4),brec_q(2:4),crec_q(1:4),drec_q(1:4),logeion_q(1:4)
+ real(qp) :: arec1_q,brec1_q,ln10_q
+ integer :: i
+
+ logd_q = real(logd,qp)
+ T_q = real(T,qp)
+ Y_q = real(Y,qp)
+ ln10_q = log(10._qp)
+ logT = log10(T_q)
+ logQ = max(-14._qp,logd_q)-2._qp*logT+12._qp
+ Yfac = 1._qp-real(frec,qp)*Y_q
+ arec_q = real(arec,qp)
+ brec_q = real(brec,qp)
+ crec_q = real(crec,qp)
+ drec_q = real(drec,qp)
+ logeion_q = real(logeion,qp)
+ arec1_q = real(arec1(logd),qp)
+ brec1_q = real(brec1(logd),qp)
+ Ttra(1) = arec1_q*logeion_q(1)+brec1_q*logQ
+ Ttra(2:4) = Yfac*arec_q*logeion_q(2:4)+brec_q*logQ
+ width(1:4) = Ttra(1:4)*crec_q*(1._qp+drec_q*logQ)
+ arg(1:4) = (logT-Ttra(1:4))/width(1:4)
+ do i=1,4
+    xion_q(i) = 0.5_qp*(rapid_tanh_qp(arg(i))+1._qp)
+ enddo
+ xion = real(xion_q,kind(xion))
+
+ if (present(dxion)) then
+    dxion_q(1) = (width(1)*(1._qp+2._qp*brec1_q) &
+                 +2._qp*crec_q(1)*(logT-Ttra(1)) &
+                  *(brec1_q*(1._qp+drec_q(1)*logQ)+drec_q(1)*Ttra(1))) &
+                 /(2._qp*T_q*ln10_q*width(1)**2)*rapid_dtanh_qp(arg(1))
+    dxion_q(2:4) = (width(2:4)*(1._qp+2._qp*brec_q) &
+                   +2._qp*crec_q(2:4)*(logT-Ttra(2:4)) &
+                    *(brec_q*(1._qp+drec_q(2:4)*logQ)+drec_q(2:4)*Ttra(2:4))) &
+                   /(2._qp*T_q*ln10_q*width(2:4)**2)*rapid_dtanh_qp(arg(2:4))
+    dxion = real(dxion_q,kind(dxion))
+ endif
+end subroutine get_xion_quad
+
+elemental real(qp) function rapid_tanh_qp(x)
+ real(qp), intent(in) :: x
+ real(qp) :: x2
+
+ if (abs(x) >= real(tanh_edge,qp)) then
+    rapid_tanh_qp = sign(1._qp,x)-real(tanh_c,qp)/x
+ else
+    x2 = x*x
+    rapid_tanh_qp = (((x2+105._qp)*x2+945._qp)*x) &
+                     / (((x2+28._qp)*x2+63._qp)*15._qp)
+ endif
+end function rapid_tanh_qp
+
+elemental real(qp) function rapid_dtanh_qp(x)
+ real(qp), intent(in) :: x
+ real(qp) :: x2,a,b
+
+ x2 = x*x
+ if (abs(x) >= real(tanh_edge,qp)) then
+    rapid_dtanh_qp = real(dtanh_c,qp)/x2
+ else
+    a = (((x2-21._qp)*x2+420._qp)*x2-6615._qp)*x2+59535._qp
+    b = (x2+28._qp)*x2+63._qp
+    rapid_dtanh_qp = a/(15._qp*b*b)
+ endif
+end function rapid_dtanh_qp
+
 !-----------------------------------------------------------------------
 !+
 !  Get recombination energy and cv_eff=Cv/mu/Rgas given rho and T
 !+
 !-----------------------------------------------------------------------
-subroutine get_erec_cveff(logd,T,X,Y,erec,cveff,derecdT,dcveffdlnT)
+subroutine get_erec_cveff(logd,T,X,Y,erec,cveff,derecdT,dcveffdlnT,use_quad)
  real, intent(in)  :: logd,T,X,Y
  real, intent(out) :: erec,cveff
  real, intent(out), optional :: derecdT,dcveffdlnT
- real :: e(1:4),xi(1:4),zi(1:4)
- real                        :: lnT,cveff2
+ logical, intent(in), optional :: use_quad
+ real :: e(1:4),xi(1:4),zi(1:4),xi_plus(1:4),xi_minus(1:4)
+ real :: lnT,Tplus,Tminus,cveff_plus,cveff_minus
+ logical :: use_quad_local
 
 ! CAUTION: This is only a poor man's way of implementing recombination energy.
 !          It only should be used for -3.5<logQ<-6 where logQ=logrho-2logT+12.
@@ -287,10 +377,12 @@ subroutine get_erec_cveff(logd,T,X,Y,erec,cveff,derecdT,dcveffdlnT)
  e(3) = eion(3)*Y*0.25
  e(4) = eion(4)*Y*0.25
 
+ use_quad_local = .false.
+ if (present(use_quad)) use_quad_local = use_quad
  if (present(derecdT).or.present(dcveffdlnT)) then
-    call get_xion(logd,T,Y,xi,zi)
+    call get_xion(logd,T,Y,xi,zi,use_quad=use_quad_local)
  else
-    call get_xion(logd,T,Y,xi)
+    call get_xion(logd,T,Y,xi,use_quad=use_quad_local)
  endif
 
  erec = sum(e(1:4)*xi(1:4))
@@ -301,8 +393,13 @@ subroutine get_erec_cveff(logd,T,X,Y,erec,cveff,derecdT,dcveffdlnT)
  lnT = log(T)
  cveff = get_cveff(lnT,xi,X,Y)
  if (present(dcveffdlnT)) then
-    cveff2 = get_cveff(lnT+dlog,xi,X,Y)
-    dcveffdlnT = (cveff2-cveff)/dlog
+    Tplus = T*exp(dlog)
+    Tminus = T*exp(-dlog)
+   call get_xion(logd,Tplus,Y,xi_plus,use_quad=use_quad_local)
+   call get_xion(logd,Tminus,Y,xi_minus,use_quad=use_quad_local)
+    cveff_plus = get_cveff(log(Tplus),xi_plus,X,Y)
+    cveff_minus = get_cveff(log(Tminus),xi_minus,X,Y)
+    dcveffdlnT = (cveff_plus-cveff_minus)/(2.*dlog)
  endif
 end subroutine get_erec_cveff
 
@@ -324,20 +421,24 @@ end function imurec1
 !  Get the mean molecular weight for partially ionised plasma
 !+
 !-----------------------------------------------------------------------
-subroutine get_imurec(logd,T,X,Y,imurec,dimurecdlnT,dimurecdlnd)
+subroutine get_imurec(logd,T,X,Y,imurec,dimurecdlnT,dimurecdlnd,use_quad)
  real, intent(in)  :: logd,T,X,Y
  real, intent(out) :: imurec
  real, intent(out), optional :: dimurecdlnT,dimurecdlnd
+ logical, intent(in), optional :: use_quad
  real :: xi(1:4),zi(1:4)
  real                        :: imurec2
+ logical :: use_quad_local
 
 ! CAUTION: This is only a poor man's way of implementing recombination energy.
 !          It only should be used for -3.5<logQ<-6 where logQ=logrho-2logT+12.
 
+ use_quad_local = .false.
+ if (present(use_quad)) use_quad_local = use_quad
  if (present(dimurecdlnT)) then
-    call get_xion(logd,T,Y,xi,zi)
+    call get_xion(logd,T,Y,xi,zi,use_quad=use_quad_local)
  else
-    call get_xion(logd,T,Y,xi)
+    call get_xion(logd,T,Y,xi,use_quad=use_quad_local)
  endif
 
  imurec = imurec1(xi,X,Y)
@@ -345,7 +446,7 @@ subroutine get_imurec(logd,T,X,Y,imurec,dimurecdlnT,dimurecdlnd)
     dimurecdlnT = T*((0.5*zi(1)+zi(2))*X+0.25*(zi(3)+zi(4))*Y)
  endif
  if (present(dimurecdlnd)) then
-    call get_xion(logd+dlog,T,Y,xi)
+   call get_xion(logd+dlog,T,Y,xi,use_quad=use_quad_local)
     imurec2 = imurec1(xi,X,Y)
     dimurecdlnd = (imurec2-imurec)/dlog
  endif

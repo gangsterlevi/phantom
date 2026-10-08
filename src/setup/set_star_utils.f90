@@ -447,11 +447,11 @@ subroutine set_star_composition(use_var_comp,use_mu,npart,xyzh,Xfrac,Yfrac,&
  call get_mass_coord(i1,npart,xyzh,mass_enclosed_r,xorigin)
 
  !$omp parallel do schedule(guided) default(none) &
- !$omp shared(i1,npart,mass_enclosed_r,Mstar,use_var_comp) &
+ !$omp shared(i1,npart,mass_enclosed_r,use_var_comp) &
  !$omp shared(Xfrac,Yfrac,mtab,eos_vars) &
  !$omp private(i,massri)
  do i = i1+1,npart
-    massri = mass_enclosed_r(i-i1)/Mstar
+    massri = mass_enclosed_r(i-i1)  ! same units as mtab, not normalised
     if (use_var_comp) then
        eos_vars(iX,i) = yinterp(Xfrac,mtab,massri)
        eos_vars(iZ,i) = 1. - eos_vars(iX,i) - yinterp(Yfrac,mtab,massri)
