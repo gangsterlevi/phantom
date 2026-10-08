@@ -106,7 +106,7 @@ end subroutine evol_init
 subroutine evol(infile,logfile,evfile,dumpfile,flag)
  use dim,              only:do_radiation,use_dustgrowth_coala
  use io_control,       only:at_simulation_end
- use part,             only:npart,xyzh,fxyzu,vxyzu,rad,radprop
+ use part,             only:npart,xyzh,fxyzu,vxyzu,rad,radprop,rho
  use part,             only:grainsize,dustevol,deltav,eos_vars,fext,dustfrac
  use radiation_utils,  only:update_radenergy,exchange_radiation_energy,implicit_radiation
  use step_lf_global,   only:step
@@ -135,7 +135,7 @@ subroutine evol(infile,logfile,evfile,dumpfile,flag)
     !
     ! Strang splitting: implicit update for half step
     !
-    if (do_radiation_update) call update_radenergy(npart,xyzh,fxyzu,vxyzu,rad,radprop,0.5*dt)
+    if (do_radiation_update) call update_radenergy(npart,fxyzu,vxyzu,rho,rad,radprop,0.5*dt)
     !
     !--evolve data for one timestep
     !  for individual timesteps this is the shortest timestep
@@ -144,9 +144,9 @@ subroutine evol(infile,logfile,evfile,dumpfile,flag)
     !
     ! Strang splitting: implicit update for another half step
     !
-    if (do_radiation_update) call update_radenergy(npart,xyzh,fxyzu,vxyzu,rad,radprop,0.5*dt)
+    if (do_radiation_update) call update_radenergy(npart,fxyzu,vxyzu,rho,rad,radprop,0.5*dt)
 
-    if (use_dustgrowth_coala) call get_growth_rate_coala(npart,xyzh,vxyzu,fxyzu,fext,&
+    if (use_dustgrowth_coala) call get_growth_rate_coala(npart,xyzh,vxyzu,rho,fxyzu,fext,&
                                grainsize,dustfrac,dustevol,deltav,dt,eos_vars)
 
     call evol_poststep(infile,logfile,evfile,dumpfile,&
@@ -164,18 +164,17 @@ end subroutine evol
 !----------------------------------------------------------------
 subroutine evol_prestep(time,dtmax,dt,t1,tcpu1,nactive,inject_flag_present)
  use dim,          only:inject_parts,use_apr,ind_timesteps
- use io,           only:fatal,id,master,iprint,iverbose
+ use io,           only:fatal,iprint,iverbose
  use apr,          only:update_apr
  use boundary_dyn, only:dynamic_bdy,update_boundaries
  use dynamic_dtmax,only:check_dtmax_for_decrease
  use evolve_utils, only:ptmass_create_and_update_forces
  use inject,       only:inject_particles
- use HIIRegion,    only:HII_feedback,iH2R,HIIuprate,nHIIsources
+ use HIIRegion,    only:iH2R,HIIuprate,HIIdt,HIIupdateflag
  use io_control,   only:nfulldump
  use mpiutils,     only:reduceall_mpi
- use part,         only:npart,npartoftype,nptmass,xyzh,vxyzu,fxyzu,apr_level,&
-                        xyzmh_ptmass,vxyz_ptmass,gravity,iboundary,ntot,ibin,iphase,&
-                        isionised
+ use part,         only:npart,npartoftype,xyzh,vxyzu,fxyzu,apr_level,&
+                        xyzmh_ptmass,vxyz_ptmass,gravity,iboundary,ntot,ibin,iphase,rho
  use partinject,   only:update_injected_particles
  use ptmass,       only:icreate_sinks,ipart_createstars
  use timestep,     only:dtextforce,dtinject,rhomaxnow
@@ -193,7 +192,7 @@ subroutine evol_prestep(time,dtmax,dt,t1,tcpu1,nactive,inject_flag_present)
  !
  if (inject_parts .and. .not. inject_flag_present) then
     npart_old = npart
-    call inject_particles(time,dtlast,xyzh,vxyzu,xyzmh_ptmass,vxyz_ptmass,npart,npart_old,npartoftype,dtinject)
+    call inject_particles(time,dtlast,xyzh,vxyzu,rho,xyzmh_ptmass,vxyz_ptmass,npart,npart_old,npartoftype,dtinject)
     call update_injected_particles(npart_old,npart,istepfrac,nbinmax,time,dtmax,dt,dtinject)
     dtlast = dt
  endif
@@ -241,14 +240,15 @@ subroutine evol_prestep(time,dtmax,dt,t1,tcpu1,nactive,inject_flag_present)
 
  if (gravity .and. icreate_sinks > 0) call ptmass_create_and_update_forces(time,dtextforce)
 
- if (iH2R > 0 .and. nHIIsources > 0 .and. id==master) then
+ if (iH2R > 0) then
     istepHII = 1
     if (ind_timesteps) then
        istepHII = 2**nbinmax/HIIuprate
        if (istepHII==0) istepHII = 1
     endif
     if (mod(istepfrac,istepHII) == 0 .or. istepfrac == 1 .or. (icreate_sinks == 2 .and. ipart_createstars /= 0)) then
-       call HII_feedback(nptmass,npart,xyzh,xyzmh_ptmass,vxyzu,isionised)
+       HIIupdateflag = .true.
+       HIIdt = dtmax/real(HIIuprate)
     endif
  endif
 

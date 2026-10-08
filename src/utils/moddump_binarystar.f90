@@ -218,7 +218,7 @@ end subroutine modify_dump
 ! This assumes the dump file only has one star.
 !
 subroutine duplicate_star(npart,npartoftype,xyzh,vxyzu,Nstar1,Nstar2)
- use part,         only: igas,set_particle_type,copy_particle
+ use part,         only:igas,set_particle_type,copy_particle
  integer, intent(inout) :: npart
  integer, intent(inout) :: npartoftype(:)
  real,    intent(inout) :: xyzh(:,:),vxyzu(:,:)
@@ -260,11 +260,11 @@ end subroutine duplicate_star
 ! Place a star that is read from another dumpfile
 !
 subroutine add_star(npart,npartoftype,xyzh,vxyzu,Nstar1,Nstar2)
- use part,            only: igas,set_particle_type,eos_vars,alphaind,maxeosvars
- use prompting,       only: prompt
- use dim,             only: maxp,maxvxyzu,nalpha,maxalpha
+ use part,            only:igas,set_particle_type,eos_vars,alphaind,maxeosvars
+ use prompting,       only:prompt
+ use dim,             only:maxp,maxvxyzu,nalpha,maxalpha
  use readwrite_dumps, only:read_dump
- use io,              only: idisk1,iprint
+ use io,              only:idisk1,iprint
  integer, intent(inout) :: npart
  integer, intent(inout) :: npartoftype(:)
  real,    intent(inout) :: xyzh(:,:),vxyzu(:,:)
@@ -524,11 +524,11 @@ end subroutine get_radii
 ! Add an ambient background fluid
 !
 !subroutine add_background(npart,npartoftype,massoftype,xyzh,vxyzu,Nstar1,Nstar2,x1com,x2com,rad1,rad2,nx)
-! use part,     only: hfact,igas,set_particle_type
-! use unifdis,  only: set_unifdis
-! use io,       only: master
+! use part,     only:hfact,igas,set_particle_type
+! use unifdis,  only:set_unifdis
+! use io,       only:master
 ! use boundary, only:set_boundary,xmin,xmax,ymin,ymax,zmin,zmax,totvol
-! use units,    only: unit_density
+! use units,    only:unit_density
 ! integer, intent(inout) :: npart
 ! integer, intent(inout) :: npartoftype(:)
 ! real,    intent(in)    :: massoftype(:)
@@ -745,11 +745,11 @@ end subroutine add_vrotational
 !  Save nstar so it can be properly written to the header
 !
 subroutine save_nstar(Nstar1,Nstar2)
- use extern_gwinspiral, only:Nstar
+ use extern_gwinspiral, only:Nstar_gw
  integer, intent(in) :: Nstar1,Nstar2
 
- Nstar(1) = Nstar1
- Nstar(2) = Nstar2
+ Nstar_gw(1) = Nstar1
+ Nstar_gw(2) = Nstar2
 
 end subroutine save_nstar
 !-----------------------------------------------------------------------

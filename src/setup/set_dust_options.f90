@@ -13,7 +13,6 @@ module set_dust_options
 ! :Owner: Mark Hutchison
 !
 ! :Runtime parameters:
-!   - dust_method       : *dust method (1=one fluid,2=two fluid,3=Hybrid)*
 !   - dust_to_gas       : *dust to gas ratio*
 !   - graindensinp      : *intrinsic grain density (in g/cm^3)*
 !   - graindenslargeinp : *intrinsic grain density (in g/cm^3)*
@@ -600,7 +599,8 @@ subroutine write_dust_setup_options(iunit,method)
  if (present(method)) then
     dust_method = method
  else
-    call write_inopt(dust_method,'dust_method','dust method (1=one fluid,2=two fluid,3=Hybrid)',iunit)
+    call write_inopt(dust_method,'dust_method',&
+        'dust method (1=dust-as-mixture,2=dust-as-particles,3=Hybrid)',iunit)
  endif
  call write_inopt(dust_to_gas,'dust_to_gas','dust to gas ratio',iunit)
  call write_inopt(idust_to_gas_norm,'idust_to_gas_norm', &
@@ -843,8 +843,8 @@ subroutine check_dust_method(dust_method,ichange_method)
  use eos,     only:ieos,get_spsound
  use io,      only:master
  use options, only:use_dustfrac
- use part,    only:npart,massoftype,xyzh,vxyzu,rhoh,igas,dustfrac,&
-                   grainsize,graindens,ndusttypes
+ use part,    only:npart,xyzh,vxyzu,rho,dustfrac,&
+                   grainsize,graindens,ndusttypes,init_rho_from_h
  integer, intent(inout) :: dust_method
  logical, intent(out)   :: ichange_method
  integer :: i,l,iregime,ierr,icheckdust(maxdusttypes)
@@ -856,13 +856,15 @@ subroutine check_dust_method(dust_method,ichange_method)
  iforce_dust_method = .false.
 
  call init_drag(ierr)
+ ! setup is before the density sum; seed rho from h for the Stokes check
+ call init_rho_from_h()
 
  dustfraci(:) = 0.
  icheckdust(:) = 0
  do i=1,npart
     r = sqrt(xyzh(1,i)**2 + xyzh(2,i)**2)
     if (use_dustfrac) then
-       rhoi = rhoh(xyzh(4,i),massoftype(igas))
+       rhoi = rho(i)
        dustfraci(1:ndusttypes) = dustfrac(1:ndusttypes,i)
        dustfracisum = sum(dustfraci(1:ndusttypes))
        rhogasi      = rhoi*(1.-dustfracisum)

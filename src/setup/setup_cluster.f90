@@ -20,6 +20,7 @@ module setup
 !   - Rsink_au    : *sink radius in au*
 !   - Temperature : *Temperature*
 !   - dist_fac    : *distance unit in pc*
+!   - iH2R_in     : *HII feedback algorithm id*
 !   - ieos_in     : *eq. of state (1: isothermal, 8: barotropic, 21: HII region)*
 !   - mass_fac    : *mass unit in Msun*
 !   - mu          : *mean molecular weight*
@@ -58,7 +59,7 @@ subroutine setpart(id,npart,npartoftype,xyzh,massoftype,vxyzu,polyk,gamma,hfact,
  use velfield,     only:set_velfield_from_cubes
  use setup_params, only:rmax,rhozero,npart_total
  use spherical,    only:set_sphere
- use part,         only:igas,set_particle_type
+ use part,         only:igas,set_particle_type,rho,init_rho_from_h
  use io,           only:fatal,master,iprint
  use units,        only:umass,udist,utime,set_units
  use setvfield,    only:normalise_vfield
@@ -77,15 +78,15 @@ subroutine setpart(id,npart,npartoftype,xyzh,massoftype,vxyzu,polyk,gamma,hfact,
  use infile_utils, only:get_options,infile_exists
  use systemutils,  only:get_command_option
  use utils_shuffleparticles, only:shuffleparticles
- integer,           intent(in)    :: id
- integer,           intent(out)   :: npart
- integer,           intent(out)   :: npartoftype(:)
- real,              intent(out)   :: xyzh(:,:)
- real,              intent(out)   :: polyk,gamma,hfact
- real,              intent(out)   :: vxyzu(:,:)
- real,              intent(out)   :: massoftype(:)
- real,              intent(inout) :: time
- character(len=20), intent(in)    :: fileprefix
+ integer,          intent(in)    :: id
+ integer,          intent(out)   :: npart
+ integer,          intent(out)   :: npartoftype(:)
+ real,             intent(out)   :: xyzh(:,:)
+ real,             intent(out)   :: polyk,gamma,hfact
+ real,             intent(out)   :: vxyzu(:,:)
+ real,             intent(out)   :: massoftype(:)
+ real,             intent(inout) :: time
+ character(len=*), intent(in)    :: fileprefix
  integer                      :: i,ierr
  real                         :: r2,totmass,epotgrav,t_ff,psep
  character(len=20), parameter :: filevx = 'cube_v1.dat'
@@ -139,7 +140,7 @@ subroutine setpart(id,npart,npartoftype,xyzh,massoftype,vxyzu,polyk,gamma,hfact,
  enddo
 
  if (relax) then
-    call shuffleparticles(iprint,npart,xyzh,massoftype(1),rsphere=rmax,dsphere=rhozero,dmedium=0.,&
+    call shuffleparticles(iprint,npart,xyzh,massoftype(1),rho,rsphere=rmax,dsphere=rhozero,dmedium=0.,&
                           is_setup=.true.,prefix=trim(fileprefix))
  endif
  !--Set velocities (from pre-made velocity cubes)
@@ -153,6 +154,7 @@ subroutine setpart(id,npart,npartoftype,xyzh,massoftype,vxyzu,polyk,gamma,hfact,
  if (ierr /= 0) call fatal('setup','error setting up velocity field')
 
  !--Normalise the energy
+ call init_rho_from_h()
  call normalise_vfield(npart,vxyzu,ierr,ke=epotgrav)
  if (ierr /= 0) call fatal('setup','error normalising velocity field')
 
@@ -186,7 +188,7 @@ subroutine setpart(id,npart,npartoftype,xyzh,massoftype,vxyzu,polyk,gamma,hfact,
        r_merge_uncond  = h_acc
        use_regnbody    = .true.
        r_neigh         = 5e-2*h_acc
-       f_crit_override = 100.
+       f_crit_override = 3000.
        if (maxvxyzu >= 4) then
           gamma   = 5./3.
           Tfloor  = 6.
@@ -225,6 +227,7 @@ subroutine get_defaults_cluster(icluster,default_cluster)
  integer,          intent(in)  :: icluster
  character(len=*), intent(out) :: default_cluster
 
+ iH2R_in = 0
  select case (icluster)
  case(4)
     ! Young Massive Cluster (S. Jaffa, University of Hertfordshire)
@@ -329,6 +332,8 @@ subroutine write_setupfile(filename)
                                     ' [if .in file does not exist]',iunit)
  write(iunit,"(/,a)") '# options for sink particles'
  call write_inopt(Rsink_au,'Rsink_au','sink radius in au',iunit)
+ write(iunit,"(/,a)") '# options for HII feedback'
+ call write_inopt(iH2R_in, 'iH2R_in','HII feedback algorithm id', iunit)
  close(iunit)
 
 end subroutine write_setupfile
@@ -359,6 +364,7 @@ subroutine read_setupfile(filename,ierr)
  call read_inopt(Temperature,'Temperature',db,errcount=nerr)
  call read_inopt(relax, 'relax',db,errcount=nerr)
  call read_inopt(mu,'mu',db,errcount=nerr)
+ call read_inopt(iH2R_in,'iH2R_in',db,errcount=nerr)
  if (maxvxyzu < 4) call read_inopt(ieos_in,'ieos_in',db,errcount=nerr)
  call read_inopt(Rsink_au,'Rsink_au',db,errcount=nerr)
  call close_db(db)

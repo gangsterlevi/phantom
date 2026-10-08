@@ -1064,7 +1064,7 @@ subroutine get_tau_inwards(point, primary, xyzh, neighbors, kappa, Rstar, tau)
 
  integer :: i, next, previous, nneigh
  integer, parameter :: nmaxcache = 0
- real  :: xyzcache(0,nmaxcache)
+ real :: xyzcache(3, max(1,nmaxcache))
  real    :: ray(3), nextDist, previousDist, maxDist, dtaudr, previousdtaudr, nextdtaudr
 
  ray = primary - xyzh(1:3,point)
@@ -1179,7 +1179,7 @@ end subroutine find_next
  !--------------------------------------------------------------------------
 subroutine calc_opacity(r0, xyzh, opacities, listneigh, nneigh, dtaudr)
  use kernel,   only:cnormk,wkern
- use part,     only:hfact,rhoh,massoftype,igas
+ use part,     only:rho,hfact
  use dim,      only:maxpsph
  real,    intent(in)  :: r0(:), xyzh(:,:), opacities(:)
  integer, intent(in)  :: listneigh(:), nneigh
@@ -1193,7 +1193,7 @@ subroutine calc_opacity(r0, xyzh, opacities, listneigh, nneigh, dtaudr)
     j = listneigh(i)
     if (j > maxpsph) cycle
     q = norm2(r0 - xyzh(1:3,j))/xyzh(4,j)
-    dtaudr=dtaudr+wkern(q*q,q)*opacities(j)*rhoh(xyzh(4,j), massoftype(igas))
+    dtaudr=dtaudr+wkern(q*q,q)*opacities(j)*rho(j)
  enddo
  dtaudr = dtaudr*cnormk/hfact**3
 end subroutine calc_opacity

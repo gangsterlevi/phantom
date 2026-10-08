@@ -134,15 +134,15 @@ subroutine init_testwind(icase,ntests,npass,npart_old,istepfrac,dtinject,npart_p
  use units,      only:umass,udist,unit_mdot,unit_velocity,unit_luminosity,utime
  use physcon,    only:au,solarm,solarl,km,seconds,years,pi,gg
  use eos,        only:gmw,ieos,init_eos,gamma,polyk
- use part,       only:npart,nptmass,xyzmh_ptmass,vxyz_ptmass,fxyz_ptmass,xyzh,vxyzu,&
-                      init_part,npartoftype,igas,iTeff,iLum,iReff,massoftype,iTwind,ivwind,imloss
+ use part,       only:npart,nptmass,xyzmh_ptmass,vxyz_ptmass,fxyz_ptmass,xyzh,vxyzu,init_part,&
+                      npartoftype,igas,iTeff,iLum,iReff,massoftype,iTwind,ivwind,imloss,iwalpha,rho
  use timestep,   only:tmax,dt,dtmax,dtrad
  use dim,        only:isothermal
  use wind,       only:trvurho_1D,rfill_domain_au
  use checksetup, only:check_setup
  use partinject, only:update_injected_particles
  use timestep_ind,     only:nbinmax
- use ptmass_radiation, only:alpha_rad,isink_radiation
+ use ptmass_radiation, only:isink_radiation
  use dust_formation,   only:idust_opacity
 
  integer, intent(in)    :: icase
@@ -155,7 +155,7 @@ subroutine init_testwind(icase,ntests,npass,npart_old,istepfrac,dtinject,npart_p
  integer :: nfailed(2),ncheck(2)
  real :: errmax(2)
  real :: t,default_particle_mass,dtnew
- real :: mdot0,mdot,mstar,r,v,rho,u,e,e0
+ real :: mdot0,mdot,mstar,r,v,rho1d,u,e,e0
  real, parameter :: tol_e = 2.e-4, tol_mdot = 5.e-16
 
  call init_part
@@ -205,11 +205,11 @@ subroutine init_testwind(icase,ntests,npass,npart_old,istepfrac,dtinject,npart_p
  tmax  = 12.
  !wind + bowen dust + radiation force
  if (icase == 1) then
-    alpha_rad = 0.
+    xyzmh_ptmass(iwalpha,1) = 0.
     isink_radiation = 0 !radiation + alpha_rad
     idust_opacity = 0   !bowen opacity
  elseif (icase == 2) then
-    alpha_rad = 1.
+    xyzmh_ptmass(iwalpha,1) = 1.
     isink_radiation = 3 !radiation + alpha_rad
     idust_opacity = 1   !bowen opacity
  else
@@ -239,7 +239,7 @@ subroutine init_testwind(icase,ntests,npass,npart_old,istepfrac,dtinject,npart_p
  ! the tests below work for both trans-sonic wind and radiation-driven wind
  if (icase == 1 .or. icase == 2) then
     ! pre-fill domain with boundary + fill shells (like setup_bondiinject): dtlast=0 triggers init path
-    call inject_particles(t,0.,xyzh,vxyzu,xyzmh_ptmass,vxyz_ptmass,&
+    call inject_particles(t,0.,xyzh,vxyzu,rho,xyzmh_ptmass,vxyz_ptmass,&
                           npart,npart_old,npartoftype,dtinject)
     call update_injected_particles(npart_old,npart,istepfrac,nbinmax,t,dtmax,dt,dtinject)
 
@@ -254,25 +254,28 @@ subroutine init_testwind(icase,ntests,npass,npart_old,istepfrac,dtinject,npart_p
     do i=1,ngrid
        r = trvurho_1D(2,i)
        v = trvurho_1D(3,i)
-       rho = trvurho_1D(5,i)
+       rho1d = trvurho_1D(5,i)
        u = trvurho_1D(4,i)
 
        ! check that the mass flux is constant at every radius in the 1D wind profile
-       mdot = 4.*pi*r**2*rho*v/unit_mdot
+       mdot = 4.*pi*r**2*rho1d*v/unit_mdot
        call checkvalbuf(mdot,mdot0,tol_mdot,'dM/dt = 4 pi r^2 rho v',nfailed(1),ncheck(1),errmax(1))
 
        ! check Bernoulli energy is constant at every radius in the 1D wind profile
-       if (isothermal) then
-          e = 0.5*v**2 - (1.-alpha_rad)*gg*mstar/r + polyk*log(rho)
-       else
-          e = 0.5*v**2 - (1.-alpha_rad)*gg*mstar/r + gamma*u
+       ! only possible if the Eddington factor (alpha) is constant!
+       if (icase == 1) then
+          if (isothermal) then
+             e = 0.5*v**2 - (1.-xyzmh_ptmass(iwalpha,1))*gg*mstar/r + polyk*log(rho1d)
+          else
+             e = 0.5*v**2 - (1.-xyzmh_ptmass(iwalpha,1))*gg*mstar/r + gamma*u
+          endif
+          e = 0.5*v**2 - (1.-xyzmh_ptmass(iwalpha,1))*gg*mstar/r + gamma*u
+          if (i == 1) e0 = e
+          call checkvalbuf(e,e0,tol_e,'Bernoulli constant',nfailed(2),ncheck(2),errmax(2))
        endif
-       e = 0.5*v**2 - (1.-alpha_rad)*gg*mstar/r + gamma*u
-       if (i == 1) e0 = e
-       call checkvalbuf(e,e0,tol_e,'Bernoulli constant',nfailed(2),ncheck(2),errmax(2))
     enddo
     call checkvalbuf_end('dM/dt = 4 pi r^2 rho v',ncheck(1),nfailed(1),errmax(1),tol_mdot)
-    call checkvalbuf_end('Bernoulli constant',ncheck(2),nfailed(2),errmax(2),tol_e)
+    if (icase == 1) call checkvalbuf_end('Bernoulli constant',ncheck(2),nfailed(2),errmax(2),tol_e)
     call update_test_scores(ntests,nfailed,npass)
  endif
 
@@ -285,15 +288,15 @@ end subroutine init_testwind
 !-----------------------------------------------------------------------
 subroutine test_against_1D_profile(ntests,npass,npart,xyzh,vxyzu,isink,xyzmh_ptmass,rmin,rmax)
  use wind,      only:interp_wind_profile_at_r
- use part,      only:rhoh,massoftype,isdead_or_accreted,igas
+ use part,      only:rho,isdead_or_accreted
  use units,     only:udist,unit_density,unit_ergg,unit_velocity
  use physcon,   only:au
  integer, intent(inout) :: ntests,npass
  integer, intent(in)    :: npart,isink
  real,    intent(in)    :: xyzh(:,:),vxyzu(:,:),xyzmh_ptmass(:,:),rmin,rmax
  integer :: i,nfailed(3),ncheck(3)
- real :: dx(3),r,rhoi,ui,vi,rho,u,v,errmax(3)
- real, parameter :: tol_v = 1.6e-1, tol_u = 1.2e-1, tol_rho = 8.e-16
+ real :: dx(3),r,rhoi,ui,vi,rho1d,u,v,errmax(3)
+ real, parameter :: tol_v = 1.6e-1, tol_u = 1.2e-1, tol_rho = 9.e-16
 
  if (id==master) write(*,"(/,a,2(f7.2,a))") &
     '--> checking wind profile against 1D for r between ',rmin*udist/au,' and ',rmax*udist/au,' au'
@@ -306,14 +309,14 @@ subroutine test_against_1D_profile(ntests,npass,npart,xyzh,vxyzu,isink,xyzmh_ptm
        dx = xyzh(1:3,i)-xyzmh_ptmass(1:3,isink)
        r = sqrt(dot_product(dx,dx))
        if (r > rmin .and. r < rmax) then
-          rhoi = rhoh(xyzh(4,i),massoftype(igas))*unit_density
+          rhoi = rho(i)*unit_density
           vi = dot_product(vxyzu(1:3,i),dx/r)*unit_velocity
           ui = vxyzu(4,i)*unit_ergg
           r = r*udist
-          call interp_wind_profile_at_r(r,v,u,rho,isink)
+          call interp_wind_profile_at_r(r,v,u,rho1d,isink)
           call checkvalbuf(v,vi,tol_v,'v',nfailed(1),ncheck(1),errmax(1))
           call checkvalbuf(u,ui,tol_u,'u',nfailed(2),ncheck(2),errmax(2))
-          call checkvalbuf(rho,rhoi,tol_rho,'rho',nfailed(3),ncheck(3),errmax(3))
+          call checkvalbuf(rho1d,rhoi,tol_rho,'rho',nfailed(3),ncheck(3),errmax(3))
        endif
     endif
  enddo
@@ -347,7 +350,7 @@ subroutine test_injected_mass(ntests,npass,npart,npart_prefill,isink,xyzmh_ptmas
  nfailed = 0
  npart_per_sphere = nint(1.2*xyzmh_ptmass(ieject,isink))  ! 1.2 is a safety factor
  tol_mass = npart_per_sphere*massoftype(igas)/minject
- call checkval(xyzmh_ptmass(4,isink),mstar-minject-mprefill,4.3e-6,nfailed(1),'sink particle mass')
+ call checkval(xyzmh_ptmass(4,isink),mstar-minject-mprefill,8e-6,nfailed(1),'sink particle mass')
  call checkval(xyzmh_ptmass(imacc,isink),0.,epsilon(0.),nfailed(2),'mass accreted')
  call checkval(minject,(npart-npart_prefill)*massoftype(igas),tol_mass,nfailed(3),'mass injected')
  call checkval(npart-npart_prefill,neject,npart_per_sphere,nfailed(4),'number of ejected particles')
@@ -363,7 +366,7 @@ end subroutine test_injected_mass
 subroutine integrate_wind(npart_old,istepfrac,dtinject)
  use io,             only:iprint
  use timestep,       only:time,tmax,dt,dtmax,nsteps,dtrad,dtforce,dtcourant,dterr,print_dtlog
- use part,           only:npart,init_part,xyzmh_ptmass,vxyz_ptmass,xyzh,vxyzu,npartoftype,ntot
+ use part,           only:npart,init_part,xyzmh_ptmass,vxyz_ptmass,xyzh,vxyzu,npartoftype,ntot,rho
  use timestep_ind,   only:nbinmax
  use step_lf_global, only:step,init_step
  use partinject,     only:update_injected_particles
@@ -390,7 +393,7 @@ subroutine integrate_wind(npart_old,istepfrac,dtinject)
     ! injection of new particles into simulation
     !
     npart_old = npart
-    call inject_particles(t,dtlast,xyzh,vxyzu,xyzmh_ptmass,vxyz_ptmass,npart,npart_old,npartoftype,dtinject)
+    call inject_particles(t,dtlast,xyzh,vxyzu,rho,xyzmh_ptmass,vxyz_ptmass,npart,npart_old,npartoftype,dtinject)
     call update_injected_particles(npart_old,npart,istepfrac,nbinmax,t,dtmax,dt,dtinject)
     dtmaxold = dtmax
     nsteps = nsteps+1

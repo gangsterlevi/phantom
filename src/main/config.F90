@@ -43,7 +43,7 @@ module dim
 #else
  integer, parameter :: maxptmass = 1000
 #endif
- integer, parameter :: nsinkproperties = 29
+ integer, parameter :: nsinkproperties = 30
 
  ! storage of thermal energy or not
 #ifdef ISOTHERMAL
@@ -123,24 +123,24 @@ module dim
 #else
  logical, parameter :: do_radiation = .false.
 #endif
- ! rhosum
- integer, parameter :: maxrhosum = 39 + &
+ ! rhosum (two extra slots for number density and dWtilde/dh)
+ integer, parameter :: maxrhosum = 41 + &
                                    maxdustlarge - 1 + &
                                    radensumden
 
  ! fsum
- integer, parameter :: fsumvars = 25 ! Number of scalars in fsum
+ integer, parameter :: fsumvars = 28 ! Number of scalars in fsum
  integer, parameter :: fsumarrs = 5  ! Number of arrays  in fsum
  integer, parameter :: maxfsum  = fsumvars + &                  ! Total number of values
                                   fsumarrs*(maxdusttypes-1) + &
                                   radensumforce
 
 ! xpartveci
- integer, parameter :: maxxpartvecidens = 14 + radenxpartvetden
+ integer, parameter :: maxxpartvecidens = 15 + radenxpartvetden
 
  integer, parameter :: maxxpartvecvars = 63 ! Number of scalars in xpartvec
  integer, parameter :: maxxpartvecarrs = 2  ! Number of arrays in xpartvec
- integer, parameter :: maxxpartvecGR   = 33 ! Number of GR values in xpartvec (1 for dens, 16 for gcov, 16 for gcon)
+ integer, parameter :: maxxpartvecGR   = 33 ! dens, 16 gcov, 16 gcon
  integer, parameter :: maxxpartveciforce = maxxpartvecvars + &              ! Total number of values
                                            maxxpartvecarrs*(maxdusttypes-1) + &
                                            radenxpartvecforce + &
@@ -239,12 +239,15 @@ module dim
 ! Self-gravity
 !--------------------
  integer :: maxgrav = 0
+ integer, parameter :: igradomega = 1  ! 1/OmegaTilde
+ integer, parameter :: igradzeta  = 2  ! hydro zeta
+ integer, parameter :: igradsoft  = 3  ! PM07 softening zeta^phi (gravity only)
 #ifdef GRAVITY
  logical, parameter :: gravity = .true.
- integer, parameter :: ngradh = 2
+ integer, parameter :: ngradh = 3
 #else
  logical, parameter :: gravity = .false.
- integer, parameter :: ngradh = 1
+ integer, parameter :: ngradh = 2
 #endif
 
 !--------------------

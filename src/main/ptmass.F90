@@ -345,15 +345,16 @@ end subroutine get_accel_sink_gas
 !----------------------------------------------------------------
 subroutine get_accel_sink_sink(nptmass,xyzmh_ptmass,fxyz_ptmass,phitot,dtsinksink,&
             iexternalforce,ti,merge_ij,merge_n,dsdt_ptmass,group_info,bin_info,&
-            extrapfac,fsink_old,metrics_ptmass,metricderivs_ptmass,vxyz_ptmass)
+            extrapfac,fsink_old,metrics_ptmass,metricderivs_ptmass,vxyz_ptmass,recompute_gr_force)
  use dim,            only:gr,use_sinktree
  use externalforces, only:externalforce
  use extern_geopot,  only:get_geopot_force
  use kernel,         only:kernel_softening,radkern
  use vectorutils,    only:unitvec
- use part,           only:igarg,igid,icomp,ihacc,ipert,shortsinktree
+ use part,           only:igarg,igid,icomp,ihacc,ipert,shortsinktree,&
+                          fgr_ptmass
  use extern_gr,      only:get_grforce
- use timestep,       only:C_force,bignumber
+ use timestep,       only:C_force,bignumber,dtf_gr_ptmass_min
  integer, intent(in)  :: nptmass
  integer, intent(in)  :: iexternalforce
  real,    intent(in)  :: xyzmh_ptmass(nsinkproperties,nptmass)
@@ -367,6 +368,7 @@ subroutine get_accel_sink_sink(nptmass,xyzmh_ptmass,fxyz_ptmass,phitot,dtsinksin
  real,    intent(in),  optional :: extrapfac
  real,    intent(in),  optional :: fsink_old(4,nptmass)
  real,    intent(in),  optional :: metrics_ptmass(:,:,:,:),metricderivs_ptmass(:,:,:,:),vxyz_ptmass(:,:)
+ logical, intent(in),  optional :: recompute_gr_force
  real    :: xi,yi,zi,pmassi,pmassj,hacci,haccj,fxi,fyi,fzi,phii,dtf
  real    :: ddr,dx,dy,dz,rr2,rr2j,dr3,f1,f2
  real    :: hsoft1,hsoft21,q2i,qi,psoft,fsoft
@@ -376,10 +378,13 @@ subroutine get_accel_sink_sink(nptmass,xyzmh_ptmass,fxyz_ptmass,phitot,dtsinksin
  real    :: J2i,rsinki,shati(3)
  real    :: J2j,rsinkj,shatj(3)
  integer :: k,l,i,j,gidi,gidj,compi
- logical :: extrap,calc_gr
+ logical :: extrap,calc_gr,do_recompute_gr
 
  calc_gr = .false.
  if (present(metrics_ptmass)) calc_gr = .true.
+ do_recompute_gr = .false.
+ if (present(recompute_gr_force)) do_recompute_gr = recompute_gr_force
+ if (do_recompute_gr .and. calc_gr) dtf_gr_ptmass_min = bignumber
  dtf = bignumber
  dtsinksink = huge(dtsinksink)
  dtf = bignumber
@@ -419,9 +424,11 @@ subroutine get_accel_sink_sink(nptmass,xyzmh_ptmass,fxyz_ptmass,phitot,dtsinksin
  !$omp shared(extrapfac,extrap,fsink_old,h_acc,icreate_sinks,use_sinktree) &
  !$omp shared(group_info,bin_info,use_regnbody,shortsinktree) &
  !$omp shared(vxyz_ptmass,metrics_ptmass,metricderivs_ptmass,calc_gr) &
+ !$omp shared(fgr_ptmass,do_recompute_gr) &
  !$omp private(i,j,xi,yi,zi,pmassi,pmassj,hacci,haccj) &
  !$omp private(compi,pert_out) &
  !$omp private(uui,densi,pri,xyzhi,vxyz,fstar,dtf) &
+ !$omp reduction(min:dtf_gr_ptmass_min) &
  !$omp private(dx,dy,dz,rr2,rr2j,ddr,dr3,f1,f2) &
  !$omp private(fxi,fyi,fzi,phii,dsx,dsy,dsz) &
  !$omp private(fextx,fexty,fextz,phiext) &
@@ -582,8 +589,14 @@ subroutine get_accel_sink_sink(nptmass,xyzmh_ptmass,fxyz_ptmass,phitot,dtsinksin
        densi = 1.
        pri   = 0.
        uui   = 0.
-       fstar = 0.
-       call get_grforce(xyzhi,metrics_ptmass(:,:,:,i),metricderivs_ptmass(:,:,:,i),vxyz,densi,uui,pri,fstar,dtf)
+       if (do_recompute_gr) then
+          fstar = 0.
+          call get_grforce(xyzhi,metrics_ptmass(:,:,:,i),metricderivs_ptmass(:,:,:,i),vxyz,densi,uui,pri,fstar,dtf)
+          fgr_ptmass(1:3,i) = fstar
+          dtf_gr_ptmass_min = min(dtf_gr_ptmass_min,dtf)
+       else
+          fstar = fgr_ptmass(1:3,i)
+       endif
        fxi = fxi + fstar(1)
        fyi = fyi + fstar(2)
        fzi = fzi + fstar(3)
@@ -636,9 +649,13 @@ subroutine get_accel_sink_sink(nptmass,xyzmh_ptmass,fxyz_ptmass,phitot,dtsinksin
     if (f2 > 0. .and. (nptmass > 1 .or. iexternalforce > 0) .and. .not. gr) then
        dtsinksink = min(dtsinksink,dtfacphi*sqrt(abs(phii)/f2))
     elseif (f2 > 0 .and. nptmass > 1 .and. gr) then
-       dtsinksink = min(dtsinksink,dtfacphi*sqrt(abs(phii)/f2),C_force*dtf)
+       dtsinksink = min(dtsinksink,dtfacphi*sqrt(abs(phii)/f2))
     endif
  enddo
+ !
+ !--GR metric-gradient force timestep (global min over sinks)
+ !
+ if (gr .and. calc_gr) dtsinksink = min(dtsinksink,C_force*dtf_gr_ptmass_min)
 
 end subroutine get_accel_sink_sink
 
@@ -1107,7 +1124,7 @@ end subroutine update_ptmass
 !-------------------------------------------------------------------------
 subroutine ptmass_create(nptmass,npart,itest,xyzh,pxyzu,fxyzu,fext,divcurlv,poten,&
                          massoftype,xyzmh_ptmass,pxyzu_ptmass,fxyz_ptmass,fxyz_ptmass_sinksink,dptmass,time)
- use part,          only:ihacc,ihsoft,itbirth,igas,iamtype,get_partinfo,iphase,iactive,maxphase,rhoh, &
+ use part,          only:ihacc,ihsoft,itbirth,igas,iamtype,get_partinfo,iphase,iactive,maxphase,rho, &
                          ispinx,ispiny,ispinz,eos_vars,igasP,igamma,ndptmass,apr_level,aprmassoftype,metrics_ptmass,&
                          isftype,inseed
  use dim,           only:maxp,maxvxyzu,maxptmass,ind_timesteps,use_apr,maxpsph,gr
@@ -1166,7 +1183,7 @@ subroutine ptmass_create(nptmass,npart,itest,xyzh,pxyzu,fxyzu,fext,divcurlv,pote
  if (itest > 0 .and. itest <= npart) then
     iphasei = iphase(itest)
     itype   = iamtype(iphasei)
-    rhomax  = rhoh(xyzh(4,itest),massoftype(itype))
+    rhomax  = rho(itest)
  endif
  call reduceloc_mpi('max',rhomax,id_rhomax)
  ForceCreation = (f_crit_override > 0. .and. rhomax > f_crit_override*rho_crit)
@@ -1231,7 +1248,7 @@ subroutine ptmass_create(nptmass,npart,itest,xyzh,pxyzu,fxyzu,fext,divcurlv,pote
  iactivej = .true.
  pmassgas1 = 1.0/pmassj
 
- if (id==id_rhomax) call summary_variable_rhomax(itest,rhoh(hi,pmassi)*real(unit_density),iprint,nptmass)
+ if (id==id_rhomax) call summary_variable_rhomax(itest,rho(itest)*real(unit_density),iprint,nptmass)
 
  if (iverbose >= 1 .and. id==id_rhomax) &
     write(iprint,"(a,i10,a,i2,a)",advance='no') &
@@ -1281,7 +1298,7 @@ subroutine ptmass_create(nptmass,npart,itest,xyzh,pxyzu,fxyzu,fext,divcurlv,pote
 !$omp parallel default(none) &
 !$omp shared(nprocs) &
 !$omp shared(maxp,maxphase,npart,maxpsph) &
-!$omp shared(nneigh,listneigh,xyzh,xyzcache,pxyzu,massoftype,iphase,pmassgas1,calc_exact_epot,hcheck2,eos_vars) &
+!$omp shared(nneigh,listneigh,xyzh,xyzcache,pxyzu,massoftype,iphase,pmassgas1,calc_exact_epot,hcheck2,eos_vars,rho) &
 !$omp shared(itest,id,id_rhomax,ifail,xi,yi,zi,hi,vxi,vyi,vzi,hi1,hi21,itype,pmassi,ieos,gamma,poten) &
 #ifdef PERIODIC
 !$omp shared(dxbound,dybound,dzbound) &
@@ -1365,7 +1382,7 @@ subroutine ptmass_create(nptmass,npart,itest,xyzh,pxyzu,fxyzu,fext,divcurlv,pote
 
        ! thermal energy (for gas only)
        if (itypej==igas) then
-          rhoj = rhoh(xyzh(4,j),pmassj)
+          rhoj = rho(j)
           if (maxvxyzu >= 4) then
              etherm = etherm + pmassj*pxyzu(4,j)
           else
@@ -1695,7 +1712,7 @@ subroutine ptmass_create(nptmass,npart,itest,xyzh,pxyzu,fxyzu,fext,divcurlv,pote
  ! print details to file, if requested
  if (record_created) then
     write(iscfile,'(es18.10,1x,3(i18,1x),8(es18.9,1x),8(i18,1x))') &
-       time,nptmass+1,itest,nneigh_act,rhoh(hi,pmassi),divvi,alpha_grav,alphabeta_grav,etot,epot,ekin,etherm,ifail_array
+       time,nptmass+1,itest,nneigh_act,real(rho(itest)),divvi,alpha_grav,alphabeta_grav,etot,epot,ekin,etherm,ifail_array
     call flush(iscfile)
  endif
 
@@ -1997,6 +2014,7 @@ subroutine ptmass_merge_release(itest,ni,nj,mi,mj,nptmass,xyzmh_ptmass,pxyz_ptma
  use units,     only:umass
  use physcon,   only:solarm
  use part,      only:isftype,inseed
+ use HIIRegion, only:update_ionrate,iH2R
  integer, intent(in)    :: itest,ni,nj
  real,    intent(in)    :: mi,mj
  integer, intent(inout) :: nptmass
@@ -2083,6 +2101,7 @@ subroutine ptmass_merge_release(itest,ni,nj,mi,mj,nptmass,xyzmh_ptmass,pxyz_ptma
     pxyz_ptmass(2,nptmass+i)            = vk(2)
     pxyz_ptmass(3,nptmass+i)            = vk(3)
     fxyz_ptmass(1:4,nptmass+i)          = 0.
+    if (iH2R > 0) call update_ionrate(nptmass+i,xyzmh_ptmass,h_acc)
     xcom(1) = xcom(1) + xyzmh_ptmass(4,nptmass+i) * xyzmh_ptmass(1,nptmass+i)
     xcom(2) = xcom(2) + xyzmh_ptmass(4,nptmass+i) * xyzmh_ptmass(2,nptmass+i)
     xcom(3) = xcom(3) + xyzmh_ptmass(4,nptmass+i) * xyzmh_ptmass(3,nptmass+i)
