@@ -806,6 +806,15 @@ ifeq ($(SETUP), binary)
     GRAVITY=yes
 endif
 
+ifeq ($(SETUP), radbinary)
+#   binary stars
+    SETUPFILE= setup_binary.f90
+    ANALYSIS= ${SRCNIMHD} utils_summary.o ptmass.o energies.o analysis_common_envelope.f90
+    KNOWN_SETUP=yes
+    GRAVITY=yes
+    RADIATION=yes
+endif
+
 ifeq ($(SETUP), binarybh)
 #   binary black hole inspiral with circumbinary disc or TDE
     SETUPFILE= setup_grdisc.f90
@@ -1271,4 +1280,11 @@ ifeq ($(SETUP), amuse)
     SINK_RADIATION=yes
     DUST_NUCLEATION=yes
     INJECT_PARTICLES=yes
+endif
+
+ifeq ($(SETUP), levi)
+#   implementation test
+    KNOWN_SETUP=yes
+    SETUPFILE= setup_alevitest.f90
+    ANALYSIS  = analysis_none.f90
 endif

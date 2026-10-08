@@ -37,11 +37,21 @@ subroutine test_eos(ntests,npass)
  use physcon,       only:solarm
  use units,         only:set_units
  use eos_gasradrec, only:irecomb
+ use ionization_mod, only:ionization_setup
  use testeos_stratified, only:test_eos_stratified
  use test_eos_stam, only:run_test_stam
  integer, intent(inout) :: ntests,npass
+ character(len=8) :: bench_xion
+ integer :: env_status
 
  if (id==master) write(*,"(/,a,/)") '--> TESTING EQUATION OF STATE MODULE'
+
+ bench_xion = ''
+ call get_environment_variable('PHANTOM_BENCH_XION',bench_xion,status=env_status)
+ if (env_status==0 .and. trim(bench_xion)=='1') then
+    call ionization_setup
+    call benchmark_get_xion
+ endif
 
  call set_units(mass=solarm,dist=1.d16,G=1.d0)
 
@@ -66,6 +76,77 @@ subroutine test_eos(ntests,npass)
  if (id==master) write(*,"(/,a)") '<-- EQUATION OF STATE TEST COMPLETE'
 
 end subroutine test_eos
+
+subroutine benchmark_get_xion
+ integer, parameter :: nbench=1000000,nrep=5
+ real :: samples(4,nrep),checksums(4),elapsed,temporary
+ integer :: i,j,rep,mode
+ logical :: use_quad,with_derivative
+
+ do rep=1,nrep
+    do j=1,4
+       mode = mod(j+rep-2,4)+1
+       use_quad = mode > 2
+       with_derivative = mod(mode,2)==0
+       call time_get_xion_mode(nbench,use_quad,with_derivative,elapsed,checksums(mode))
+       samples(mode,rep) = elapsed
+    enddo
+ enddo
+
+ do mode=1,4
+    do i=2,nrep
+       temporary = samples(mode,i)
+       j = i-1
+       do while (j >= 1)
+          if (samples(mode,j) <= temporary) exit
+          samples(mode,j+1) = samples(mode,j)
+          j = j-1
+       enddo
+       samples(mode,j+1) = temporary
+    enddo
+ enddo
+
+ write(*,'(/,a)') 'get_xion benchmark: median CPU time per million calls (5 runs)'
+ write(*,'(a,f9.4,a,es14.6)') ' double, no derivative: ',samples(1,3), &
+      ' s; checksum=',checksums(1)
+ write(*,'(a,f9.4,a,es14.6)') ' double, derivative:    ',samples(2,3), &
+      ' s; checksum=',checksums(2)
+ write(*,'(a,f9.4,a,es14.6)') ' quad, no derivative:   ',samples(3,3), &
+      ' s; checksum=',checksums(3)
+ write(*,'(a,f9.4,a,es14.6)') ' quad, derivative:      ',samples(4,3), &
+      ' s; checksum=',checksums(4)
+
+end subroutine benchmark_get_xion
+
+subroutine time_get_xion_mode(ncalls,use_quad,with_derivative,elapsed,checksum)
+ use ionization_mod, only:get_xion
+ integer, intent(in) :: ncalls
+ logical, intent(in) :: use_quad,with_derivative
+ real, intent(out) :: elapsed,checksum
+ real :: xion(4),dxion(4),logd,temp,t0,t1
+ integer :: i
+
+ do i=1,10000
+    call get_xion(-7.5,4.e4,0.25,xion,use_quad=use_quad)
+    call get_xion(-7.5,4.e4,0.25,xion,dxion,use_quad=use_quad)
+ enddo
+ checksum = 0.
+ call cpu_time(t0)
+ do i=1,ncalls
+    logd = -8. + 3.*real(mod(i,1000))/999.
+    temp = 2.e4 + 6.e4*real(mod(i,997))/996.
+    if (with_derivative) then
+       call get_xion(logd,temp,0.25,xion,dxion,use_quad=use_quad)
+       checksum = checksum + sum(xion)+sum(dxion)
+    else
+       call get_xion(logd,temp,0.25,xion,use_quad=use_quad)
+       checksum = checksum + sum(xion)
+    endif
+ enddo
+ call cpu_time(t1)
+ elapsed = t1-t0
+
+end subroutine time_get_xion_mode
 
 !----------------------------------------------------------
 !+
