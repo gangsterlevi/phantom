@@ -14,8 +14,12 @@ module relaxstar
 ! :Owner: Daniel Price
 !
 ! :Runtime parameters:
-!   - maxits   : *maximum number of relaxation iterations*
-!   - tol_ekin : *tolerance on ekin/epot to stop relaxation*
+!   - damp_radrelax    : *damp velocities during radiative relaxation*
+!   - maxits           : *maximum number of relaxation iterations*
+!   - maxits_radrelax  : *maximum number of steps in radiative relaxation*
+!   - relax_radiation  : *relax star with radiation transport after setting composition*
+!   - tol_ekin         : *tolerance on ekin/epot to stop relaxation*
+!   - tol_radrelax     : *tolerance on average absolute change in u+xi per dynamical time*
 !
 ! :Dependencies: apr, checksetup, damping, deriv, dim, dump_utils,
 !   energies, eos, externalforces, fileutils, infile_utils, initial, io,
@@ -23,10 +27,15 @@ module relaxstar
 !   readwrite_dumps, setstar_utils, step_lf_global, table_utils, units
 !
  implicit none
- public :: relax_star,write_options_relax,read_options_relax
+ public :: relax_star,relax_star_radiation,write_options_relax,read_options_relax
 
  real,    public  :: tol_ekin = 1.e-7 ! criteria for being converged
  integer, public  :: maxits = 1000
+
+ logical, public  :: relax_radiation = .false. ! relax with radiation transport after the hydrodynamic relaxation
+ logical, public  :: damp_radrelax = .false.   ! damp velocities during the radiative relaxation
+ real,    public  :: tol_radrelax = 1.e-3      ! average absolute change in u+xi per dynamical time
+ integer, public  :: maxits_radrelax = 10000
 
  real,    private :: gammaprev,hfactprev,mass1prev
  integer, private :: ieos_prev
@@ -34,7 +43,9 @@ module relaxstar
  integer, public :: ierr_setup_errors = 1, &
                     ierr_no_pressure  = 2, &
                     ierr_unbound = 3, &
-                    ierr_notconverged = 4
+                    ierr_notconverged = 4, &
+                    ierr_radrelax_unsupported = 5, &
+                    ierr_radrelax_notconverged = 6
 
  private
 
@@ -355,6 +366,179 @@ end subroutine relax_star
 
 !----------------------------------------------------------------
 !+
+!  relax the star further with radiation transport, using the real
+!  equation of state and the implicit radiation solver. Particles
+!  evolve hydrodynamically (damped) together with u and xi until
+!  the mass-weighted mean absolute change in u+xi per dynamical time is below
+!  tol_radrelax. Must be called after the composition and thermal
+!  energy / radiation energy have been set.
+!
+!  IN:
+!    rstar,mtot - radius and total mass of the star (code units)
+!    npin       - number of particles to ignore at start of array
+!    label      - label for the rad_relax<label>_* snapshots
+!    write_dumps- if false, do not write snapshots or the .ev file
+!                 if previous rad_relax<label>_* snapshots exist, the
+!                 relaxation is resumed from the latest matching dump
+!+
+!----------------------------------------------------------------
+subroutine relax_star_radiation(npart,xyzh,rstar,mtot,npin,ierr,label,write_dumps)
+ use deriv,          only:get_derivs_global
+ use dim,            only:maxvxyzu,do_radiation,gr
+ use eos_gasradrec,  only:report_newton_stalls
+ use eos,            only:ieos
+ use part,           only:vxyzu,rad,iradxi,init_rho_from_h,massoftype,igas,apr_level,aprmassoftype
+ use step_lf_global, only:init_step,step
+ use damping,        only:damp
+ use options,        only:idamp,implicit_radiation
+ use io,             only:warning,id,master
+ use physcon,        only:pi
+ use fileutils,      only:getnextfilename
+ use readwrite_dumps, only:write_fulldump
+ use apr,             only:use_apr
+ integer,  intent(in)    :: npin
+ integer,  intent(inout) :: npart
+ real,     intent(inout) :: xyzh(:,:)
+ real,     intent(in)    :: rstar,mtot
+ integer,  intent(out)   :: ierr
+ character(len=*), intent(in), optional :: label
+ logical,          intent(in), optional :: write_dumps
+ integer :: i,nits,ncheck,iunit,nits_dumped
+ real    :: t,dt,dtext,dtnew,tdyn,tlast,dtcheck,err,rmax,du_sum,dxi_sum,duxi_sum,mtot_sum,pmassi
+ real, allocatable :: u0(:),xi0(:)
+ logical :: converged,implicit_prev,write_files,restart
+ character(len=20) :: filename,mylabel
+ integer, parameter :: nstep_check = 10
+ integer, parameter :: nstep_dump = 100
+
+ ierr = 0
+ if (.not.do_radiation .or. maxvxyzu < 4 .or. gr) then
+    call warning('relax_star_radiation','radiative relaxation needs radiation, thermal energy and no GR')
+    ierr = ierr_radrelax_unsupported
+    return
+ endif
+
+ write_files = .true.
+ if (present(write_dumps)) write_files = write_dumps
+ mylabel = ''
+ if (present(label)) mylabel = label
+
+ tdyn = 2.*pi*sqrt(rstar**3/(32.*mtot))
+ if (id==master) print "(/,a,es10.3,a,i0)",' RADIATIVE RELAXATION: average |max(du, dxi)|/tdyn tolerance = ',tol_radrelax,&
+                                           ', max steps = ',maxits_radrelax
+
+ filename = 'rad_relax'//trim(mylabel)//'_00000'
+ call check_for_existing_file(filename,npart,massoftype(igas),xyzh,vxyzu,restart,ierr)
+ if (ierr /= 0) return
+
+ implicit_prev = implicit_radiation
+ implicit_radiation = .true.
+ if (damp_radrelax) then
+    idamp = 1
+    damp = 1./tdyn  ! damping timescale of one dynamical time
+ else
+    idamp = 0
+    damp = 0.
+ endif
+ vxyzu(1:3,npin+1:npart) = 0.
+
+ call init_rho_from_h(npin+1,npart)
+ t  = 0.
+ dt = epsilon(0.)
+ dtext = huge(dtext)
+ call get_derivs_global()
+ call init_step(npart,t,tdyn)
+
+ allocate(u0(npart),xi0(npart))
+ u0  = vxyzu(4,1:npart)
+ xi0 = rad(iradxi,1:npart)
+ tlast = t
+ converged = .false.
+ ncheck = 0
+ nits = 0
+ nits_dumped = 0
+ if (write_files) then
+    if (.not.restart) call write_fulldump(t,filename)
+    if (restart) then
+       open(newunit=iunit,file='rad_relax'//trim(mylabel)//'.ev',status='unknown',position='append')
+    else
+       open(newunit=iunit,file='rad_relax'//trim(mylabel)//'.ev',status='replace')
+       write(iunit,"(a)") '# nits,t/tdyn,mass-averaged |d(max(u, xi))| per tdyn'
+    endif
+ endif
+ do while (.not.converged .and. nits < maxits_radrelax)
+    nits = nits + 1
+    t = t + dt
+    call step(npart,npart,t,dt,dtext,dtnew)
+    dt = dtnew
+
+    if (mod(nits,nstep_check)==0) then
+       du_sum = 0.
+       dxi_sum = 0.
+       duxi_sum = 0.
+       mtot_sum = 0.
+       rmax = 0.
+       do i = npin+1,npart
+          if (use_apr) then
+             pmassi = aprmassoftype(igas,apr_level(i))
+          else
+             pmassi = massoftype(igas)
+          endif
+          du_sum = du_sum + pmassi*abs(vxyzu(4,i)-u0(i))
+          dxi_sum = dxi_sum + pmassi*abs(rad(iradxi,i)-xi0(i))
+          duxi_sum = duxi_sum + pmassi*((vxyzu(4,i)-u0(i)) + (rad(iradxi,i)-xi0(i)))
+          mtot_sum = mtot_sum + pmassi
+          rmax = max(rmax,sqrt(dot_product(xyzh(1:3,i),xyzh(1:3,i))))
+       enddo
+       dtcheck = t - tlast
+       err = max(du_sum,dxi_sum)/mtot_sum*tdyn/dtcheck
+       u0  = vxyzu(4,1:npart)
+       xi0 = rad(iradxi,1:npart)
+       tlast = t
+       converged = (err < tol_radrelax)
+       ncheck = ncheck + 1
+       if (write_files) write(iunit,*) nits,t/tdyn,err
+       if (id==master) then
+          write(*,'(a,i0,a,i0,a,1pg11.3,a,1pg11.3,a,1pg11.3,a,1pg11.3,a,1pg11.3)') &
+             ' Relaxing star with radiation: Iter ',nits,'/',maxits_radrelax, &
+             ', R*:',rmax,', t/tdyn:',t/tdyn, &
+             ', average absolute change in u or xi per tdyn:',err, &
+             ', radiation (du+dxi)/tdyn:',abs(duxi_sum)/mtot_sum*tdyn/dtcheck
+       endif
+       call report_newton_stalls(6,int(npart,kind=8),ieos)
+    endif
+
+    if (write_files .and. mod(nits,nstep_dump)==0) then
+       filename = getnextfilename(filename)
+       call write_fulldump(t,filename)
+       call flush(iunit)
+       nits_dumped = nits
+    endif
+ enddo
+
+ if (write_files) then
+    if (nits /= nits_dumped) then
+       filename = getnextfilename(filename)
+       call write_fulldump(t,filename)
+    endif
+    close(iunit)
+ endif
+
+ if (.not.converged) then
+    call warning('relax_star_radiation','radiative relaxation did not converge, just reached max steps')
+    ierr = ierr_radrelax_notconverged
+ endif
+
+ implicit_radiation = implicit_prev
+ idamp = 0
+ damp = 0.
+ vxyzu(1:3,npin+1:npart) = 0.
+ deallocate(u0,xi0)
+
+end subroutine relax_star_radiation
+
+!----------------------------------------------------------------
+!+
 !  shift particles: this is like timestepping but done
 !  asynchronously. Each particle shifts by dx = 0.5*dt^2*a
 !  where dt is the local courant timestep, i.e. h/c_s
@@ -648,12 +832,21 @@ end subroutine restore_original_options
 !  write relaxation options to .setup file
 !+
 !----------------------------------------------------------------
-subroutine write_options_relax(iunit)
+subroutine write_options_relax(iunit,relax,ieos)
  use infile_utils, only:write_inopt
- integer, intent(in) :: iunit
+ use dim,          only:do_radiation
+ integer, intent(in) :: iunit,ieos
+ logical, intent(in) :: relax
 
  call write_inopt(tol_ekin,'tol_ekin','tolerance on ekin/epot to stop relaxation',iunit)
  call write_inopt(maxits,'maxits','maximum number of relaxation iterations',iunit)
+ if (do_radiation .and. relax .and. ieos==20) then
+    call write_inopt(relax_radiation,'relax_radiation','relax with radiation transport after setting composition',iunit)
+    call write_inopt(damp_radrelax,'damp_radrelax','damp velocities during radiative relaxation',iunit)
+   call write_inopt(tol_radrelax,'tol_radrelax',&
+                'tolerance on mass-weighted mean absolute change in u+xi per dynamical time (code specific energy)',iunit)
+    call write_inopt(maxits_radrelax,'maxits_radrelax','maximum number of steps in radiative relaxation',iunit)
+ endif
 
 end subroutine write_options_relax
 
@@ -662,13 +855,22 @@ end subroutine write_options_relax
 !  read relaxation options from .setup file
 !+
 !----------------------------------------------------------------
-subroutine read_options_relax(db,nerr)
+subroutine read_options_relax(db,nerr,relax,ieos)
  use infile_utils, only:inopts,read_inopt
+ use dim,          only:do_radiation
  type(inopts), allocatable, intent(inout) :: db(:)
  integer,                   intent(inout) :: nerr
+ logical,                   intent(in)    :: relax
+ integer,                   intent(in)    :: ieos
 
  call read_inopt(tol_ekin,'tol_ekin',db,errcount=nerr)
  call read_inopt(maxits,'maxits',db,errcount=nerr)
+ if (do_radiation .and. relax .and. ieos==20) then
+    call read_inopt(relax_radiation,'relax_radiation',db,errcount=nerr)
+    call read_inopt(damp_radrelax,'damp_radrelax',db,errcount=nerr)
+    call read_inopt(tol_radrelax,'tol_radrelax',db,errcount=nerr,min=0.)
+    call read_inopt(maxits_radrelax,'maxits_radrelax',db,errcount=nerr,min=1)
+ endif
 
 end subroutine read_options_relax
 

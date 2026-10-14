@@ -201,7 +201,7 @@ subroutine set_star(id,master,star,xyzh,vxyzu,eos_vars,rad,&
  use setstar_utils,      only:set_stellar_core,read_star_profile,set_star_density, &
                               set_star_composition,set_star_thermalenergy,&
                               write_kepler_comp
- use relaxstar,          only:relax_star
+ use relaxstar,          only:relax_star,relax_star_radiation,relax_radiation
  use part,               only:ihsoft,igas,imu,set_particle_type,ilum
  use extern_densprofile, only:write_rhotab
  use unifdis,            only:mask_prototype
@@ -227,7 +227,7 @@ subroutine set_star(id,master,star,xyzh,vxyzu,eos_vars,rad,&
  logical,         intent(in),  optional :: write_files
  real,            intent(out), optional :: density_error,energy_error
  procedure(mask_prototype)      :: mask
- integer                        :: npts,ierr_relax,nerr
+ integer                        :: npts,ierr_relax,nerr,ierr_radrelax
  integer                        :: ncols_compo,npart_old,i,iptmass_core,nptmass_old
  real, allocatable              :: r(:),den(:),pres(:),temp(:),en(:),mtab(:),Xfrac(:),Yfrac(:),mu(:)
  real, allocatable              :: composition(:,:)
@@ -395,6 +395,19 @@ subroutine set_star(id,master,star,xyzh,vxyzu,eos_vars,rad,&
  if (maxvxyzu==4) call set_star_thermalenergy(ieos,den,pres,temp,r,npts,npart,&
                        xyzh,vxyzu,rad,eos_vars,relax,use_var_comp,star%initialtemp,&
                        star%polyk,npin=npart_old)
+ !
+ ! relax further with radiation transport, now that the composition
+ ! and thermal / radiation energy are set (other bodies are masked)
+ !
+ if (relax .and. relax_radiation .and. do_radiation .and. maxvxyzu==4) then
+    if (npart_old > 0) xyzh(4,1:npart_old) = -abs(xyzh(4,1:npart_old))
+    if (nptmass_old > 0) xyzmh_ptmass(4,1:nptmass_old) = -abs(xyzmh_ptmass(4,1:nptmass_old))
+    call relax_star_radiation(npart,xyzh,star%r_code,star%m_code,npart_old,ierr_radrelax,&
+                              label=star%label,write_dumps=write_dumps)
+    if (npart_old > 0) xyzh(4,1:npart_old) = abs(xyzh(4,1:npart_old))
+    if (nptmass_old > 0) xyzmh_ptmass(4,1:nptmass_old) = abs(xyzmh_ptmass(4,1:nptmass_old))
+    if (ierr_radrelax /= 0) ierr_relax = ierr_radrelax
+ endif
  !
  ! shift star to requested position and velocity
  !
@@ -791,6 +804,8 @@ end subroutine set_star_interactive
 subroutine set_stars_interactive(star,ieos,relax,nstar)
  use prompting,    only:prompt
  use infile_utils, only:int_to_string
+ use dim,          only:do_radiation
+ use relaxstar,    only:relax_radiation,damp_radrelax,tol_radrelax,maxits_radrelax
  type(star_t), intent(inout) :: star(:)
  integer,      intent(inout) :: ieos
  logical,      intent(out)   :: relax
@@ -819,6 +834,14 @@ subroutine set_stars_interactive(star,ieos,relax,nstar)
 
        relax = .false.
        call prompt('Relax bodies automatically during setup?',relax)
+       if (relax .and. do_radiation .and. ieos==20) then
+          call prompt('Further relax with radiation transport after setting composition?',relax_radiation)
+          if (relax_radiation) then
+             call prompt('Damp velocities during radiative relaxation?',damp_radrelax)
+             call prompt('Enter tolerance on mean absolute change in u or xi per dynamical time',tol_radrelax,0.)
+             call prompt('Enter maximum number of steps in radiative relaxation',maxits_radrelax,1)
+          endif
+       endif
     endif
  endif
 
@@ -1060,7 +1083,7 @@ subroutine write_options_stars(star,relax,write_rho_to_file,ieos,iunit,nstar)
 
        write(iunit,"(/,a)") '# relaxation options'
        call write_inopt(relax,'relax','relax bodies into equilibrium',iunit)
-       call write_options_relax(iunit)
+       call write_options_relax(iunit,relax,ieos)
        call write_inopt(write_rho_to_file,'write_rho_to_file','write density profile(s) to file',iunit)
     endif
  endif
@@ -1106,7 +1129,7 @@ subroutine read_options_stars(star,ieos,relax,write_rho_to_file,db,nerr,nstar)
        call read_options_stars_eos(nstars,star(1:nstars),label(1:nstars),ieos,db,nerr)
        ! relaxation options
        call read_inopt(relax,'relax',db,errcount=nerr)
-       call read_options_relax(db,nerr)
+       call read_options_relax(db,nerr,relax,ieos)
        ! option to write density profile to file
        call read_inopt(write_rho_to_file,'write_rho_to_file',db,errcount=nerr)
     endif

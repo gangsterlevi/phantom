@@ -45,6 +45,8 @@ subroutine update_time_and_dt(nsteps,time,dtmax,dtmaxold,rhomaxnow,tlast,tcheck,
  use dynamic_dtmax, only:dtmax_ifactor
  use mpiutils,      only:bcast_mpi,reduceall_mpi
  use timestep,      only:dtrad,dtforce,dtinject,dtcourant,dterr,print_dtlog,tmax
+ use eos_gasradrec, only:report_newton_stalls
+ use eos,          only:ieos
  use timestep_ind,  only:print_dtind_efficiency,update_time_per_bin,print_dtlog_ind,change_nbinmax,&
                          nactivetot,nbinmax
  integer,         intent(inout) :: nsteps
@@ -103,6 +105,7 @@ subroutine update_time_and_dt(nsteps,time,dtmax,dtmaxold,rhomaxnow,tlast,tcheck,
 !
     if (id==master) call print_dtlog(iprint,time,dt,dtforce,dtcourant,dterr,dtmax,dtrad,&
                                     dtprint,dtinject,ntot)
+   call report_newton_stalls(iprint,ntot,ieos)
  endif
 
  !   check that MPI threads are synchronised in time

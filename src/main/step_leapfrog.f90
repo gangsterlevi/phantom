@@ -43,11 +43,14 @@ contains
 !+
 !------------------------------------------------------------
 subroutine init_step(npart,time,dtmax)
+ use eos_gasradrec, only:reset_newton_stalls
  use timestep_ind, only:get_dt,nbinmax
  use part,         only:ibin,twas,iphase,iamboundary,iamtype
  integer, intent(in) :: npart
  real,    intent(in) :: time,dtmax
  integer             :: i
+
+ call reset_newton_stalls()
  !
  ! first time through, move all particles on shortest timestep
  ! then allow them to gradually adjust levels.

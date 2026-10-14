@@ -69,6 +69,16 @@ LIBCXX = -lstdc++
 LDFLAGS=
 LIBTOOL=ar rcs
 
+# Heian configuration
+ifeq ($(SYSTEM),heian)
+    include Makefile_defaults_ifx
+    QSYS = slurm
+    KNOWN_SYSTEM=yes
+ifeq ($(MPI),heian)
+    USEMPI=yes
+    endif
+endif
+
 #----------------------------------------------------------------
 # here follows specific configuration options used
 # for various types of simulations

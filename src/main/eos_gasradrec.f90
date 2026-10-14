@@ -21,9 +21,11 @@ module eos_gasradrec
  implicit none
  integer, public :: irecomb = 0 ! types of recombination energy to include for ieos=20
  public :: equationofstate_gasradrec,calc_uT_from_rhoP_gasradrec,calc_uP_from_rhoT_gasradrec,&
-           read_options_eos_gasradrec,write_options_eos_gasradrec,eos_info_gasradrec,init_eos_gasradrec
+           read_options_eos_gasradrec,write_options_eos_gasradrec,eos_info_gasradrec,init_eos_gasradrec,&
+           report_newton_stalls,reset_newton_stalls
  private
  real, parameter :: eoserr=1.e-15,W4err=1.e-2
+integer :: nstall_newton = 0
 
 contains
 !-----------------------------------------------------------------------
@@ -60,8 +62,8 @@ subroutine equationofstate_gasradrec(d,eint,T,imu,X,Y,p,cf,gamma_eff,cveff_out,d
  use_quad = .false.
  precision_passes: do ipass = 1,2
     if (ipass == 2) then
-       use_quad = .true.
-       call warning('eos_gasradrec','Newton solver stalled; retrying ionization fit in quad precision')
+      use_quad = .true.
+      nstall_newton = nstall_newton + 1
        Tdot = 0.
        dt = 0.9
     endif
@@ -211,15 +213,17 @@ end subroutine calc_uP_from_rhoT_gasradrec
 subroutine calc_uT_from_rhoP_gasradrec(rhoi,presi,X,Y,T,u,mui,ierr,do_radiation)
  use ionization_mod, only:get_imurec
  use physcon,        only: radconst,Rg
+ use io,             only:warning
  real,    intent(in)    :: rhoi,presi,X,Y
  real,    intent(inout) :: T
  real,    intent(out)   :: u
  integer, intent(out)   :: ierr
  logical, intent(in),  optional :: do_radiation
  real,    intent(out), optional :: mui
- integer                       :: n
+ integer                       :: n,ipass
  real                          :: logrhoi,imu,dimurecdlnT,dT,Tdot,corr,p1
- logical                       :: do_radiation_local
+ real                          :: T_prev,T_prev2
+ logical                       :: do_radiation_local,use_quad,converged
  integer, parameter            :: nmax = 500
 
  if (.not. present(do_radiation)) then
@@ -231,31 +235,49 @@ subroutine calc_uT_from_rhoP_gasradrec(rhoi,presi,X,Y,T,u,mui,ierr,do_radiation)
  if (T <= 0.) T = min((3.*presi/radconst)**0.25, presi/(rhoi*Rg))  ! initial guess for temperature
  ierr = 0
  corr = huge(0.)
- Tdot = 0.
- dT = 0.9
  logrhoi = log10(rhoi)
- do n = 1,nmax
-    call get_imurec(logrhoi,T,X,Y,imu,dimurecdlnT)
-    if (do_radiation_local) then
-       corr = ( presi - rhoi*Rg*imu*T ) / &
-              ( -rhoi*Rg * ( imu + dimurecdlnT ) )
-    else
-       corr = ( presi - (rhoi*Rg*imu + radconst*T**3/3.)*T ) / &
-              ( -rhoi*Rg * ( imu + dimurecdlnT ) - 4.*radconst*T**3/3. )
+ converged = .false.
+ use_quad = .false.
+ precision_passes: do ipass = 1,2
+    if (ipass == 2) then
+       use_quad = .true.
+       nstall_newton = nstall_newton + 1
     endif
-    if (abs(corr)>W4err*T) then
-       T = T + Tdot*dT
-       Tdot = (1.-2.*dT)*Tdot - dT*corr
-    else
-       T = T - corr
-       Tdot = 0.
-    endif
-    if (abs(corr) < eoserr*T) exit
-    if (n > 50) dT = 0.5
- enddo
- if (n > nmax) then
+    Tdot = 0.
+    dT = 0.9
+    T_prev = huge(0.)
+    T_prev2 = huge(0.)
+    do n = 1,nmax
+       if (.not.use_quad .and. n > 2 .and. (T == T_prev .or. T == T_prev2)) exit
+       T_prev2 = T_prev
+       T_prev = T
+       call get_imurec(logrhoi,T,X,Y,imu,dimurecdlnT,use_quad=use_quad)
+       if (do_radiation_local) then
+          corr = ( presi - rhoi*Rg*imu*T ) / &
+                 ( -rhoi*Rg * ( imu + dimurecdlnT ) )
+       else
+          corr = ( presi - (rhoi*Rg*imu + radconst*T**3/3.)*T ) / &
+                 ( -rhoi*Rg * ( imu + dimurecdlnT ) - 4.*radconst*T**3/3. )
+       endif
+       if (abs(corr)>W4err*T) then
+          T = T + Tdot*dT
+          Tdot = (1.-2.*dT)*Tdot - dT*corr
+       else
+          T = T - corr
+          Tdot = 0.
+       endif
+       if (abs(corr) < eoserr*T) then
+          converged = .true.
+          exit
+       endif
+       if (n > 50) dT = 0.5
+    enddo
+    if (converged) exit precision_passes
+ enddo precision_passes
+ if (.not.converged) then
+    call get_imurec(logrhoi,T,X,Y,imu,dimurecdlnT,use_quad=use_quad)
     print*,'Error in calc_uT_from_rhoP_hormone'
-    print*,'rho=',rhoi,'P=',presi,'mu=',1./imu
+    print*,'rho=',rhoi,'P=',presi,'mu=',1./imu, 'corr/T=',corr/T
     ierr = 1
     return
  endif
@@ -263,6 +285,47 @@ subroutine calc_uT_from_rhoP_gasradrec(rhoi,presi,X,Y,T,u,mui,ierr,do_radiation)
  mui = 1./imu
 
 end subroutine calc_uT_from_rhoP_gasradrec
+
+!-----------------------------------------------------------------------
+!+
+!  report how many Newton solves needed the quad-precision retry during
+!  the most recent timestep, then reset the counter
+!+
+!-----------------------------------------------------------------------
+subroutine report_newton_stalls(iprint,ntot,ieos)
+ use io,        only:warning
+ use mpiutils,  only:reduceall_mpi
+ integer,          intent(in) :: iprint
+ integer,          intent(in) :: ieos
+ integer(kind=8),  intent(in) :: ntot
+ integer(kind=8) :: nstall_total
+ character(len=120) :: message
+
+ if (ieos /= 20) then
+    nstall_newton = 0
+    return
+ endif
+
+ nstall_total = reduceall_mpi('+',nstall_newton)
+ if (nstall_total > 0) then
+    write(message,'(a,i0,a,i0,a)') 'Newton solver stalled for ',nstall_total,'/',ntot,&
+         ' particles this timestep; retrying ionization fit in quad precision'
+    call warning('eos_gasradrec',trim(message))
+ endif
+ nstall_newton = 0
+
+end subroutine report_newton_stalls
+
+!-----------------------------------------------------------------------
+!+
+!  reset the stall counter without printing
+!+
+!-----------------------------------------------------------------------
+subroutine reset_newton_stalls
+
+ nstall_newton = 0
+
+end subroutine reset_newton_stalls
 
 !-----------------------------------------------------------------------
 !+
