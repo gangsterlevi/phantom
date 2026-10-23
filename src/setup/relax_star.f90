@@ -308,9 +308,10 @@ subroutine relax_star(nt,rhotab,pr,temp,r,npart,xyzh,use_var_comp,Xfrac,Yfrac,mu
           if (use_var_comp) call set_star_composition(eos_outputs_mu(ieos_prev),&
                                  npart,xyzh,Xfrac,Yfrac,mu,mr,eos_vars,npin=i1,x0=x0)
 
+          ! Use the same composition treatment as the final conversion in set_star.
           if (maxvxyzu==4) call set_star_thermalenergy(ieos_prev,rhotab,pr,temp,&
                                 r,nt,npart,xyzh,vxyzu,rad,eos_vars,.true.,&
-                                use_var_comp=.false.,initialtemp=1.e3,polyk_in=polyk,npin=i1,x0=x0)
+                                use_var_comp=use_var_comp,initialtemp=1.e3,polyk_in=polyk,npin=i1,x0=x0)
 
           ! write relaxation snapshots
           if (write_files) then
@@ -396,6 +397,7 @@ subroutine relax_star_radiation(npart,xyzh,rstar,mtot,npin,ierr,label,write_dump
  use fileutils,      only:getnextfilename
  use readwrite_dumps, only:write_fulldump
  use apr,             only:use_apr
+ use radiation_utils, only:write_options_radiation
  integer,  intent(in)    :: npin
  integer,  intent(inout) :: npart
  real,     intent(inout) :: xyzh(:,:)
@@ -433,6 +435,7 @@ subroutine relax_star_radiation(npart,xyzh,rstar,mtot,npin,ierr,label,write_dump
 
  implicit_prev = implicit_radiation
  implicit_radiation = .true.
+ if (id==master) call write_options_radiation(6)
  if (damp_radrelax) then
     idamp = 1
     damp = 1./tdyn  ! damping timescale of one dynamical time
@@ -835,6 +838,8 @@ end subroutine restore_original_options
 subroutine write_options_relax(iunit,relax,ieos)
  use infile_utils, only:write_inopt
  use dim,          only:do_radiation
+ use radiation_utils, only:exchange_radiation_energy,limit_radiation_flux,tol_rad,itsmax_rad,cv_type,kappa_cgs
+ use eos,          only:iopacity_type
  integer, intent(in) :: iunit,ieos
  logical, intent(in) :: relax
 
@@ -846,6 +851,14 @@ subroutine write_options_relax(iunit,relax,ieos)
    call write_inopt(tol_radrelax,'tol_radrelax',&
                 'tolerance on mass-weighted mean absolute change in u+xi per dynamical time (code specific energy)',iunit)
     call write_inopt(maxits_radrelax,'maxits_radrelax','maximum number of steps in radiative relaxation',iunit)
+    write(iunit,"(/,a)") '# radiation options for relaxation (override .in values during setup)'
+    call write_inopt(exchange_radiation_energy,'gas-rad_exchange','exchange energy between gas and radiation',iunit)
+    call write_inopt(limit_radiation_flux,'flux_limiter','limit radiation flux',iunit)
+    call write_inopt(iopacity_type,'iopacity_type','opacity method (0=inf,1=mesa,2=constant,-1=preserve)',iunit)
+    if (iopacity_type==2) call write_inopt(kappa_cgs,'kappa_cgs','constant opacity value in cm2/g',iunit)
+    call write_inopt(tol_rad,'tol_rad','tolerance on backwards Euler implicit solve of dxi/dt',iunit)
+    call write_inopt(itsmax_rad,'itsmax_rad','max number of iterations for radiation implicit solve',iunit)
+    call write_inopt(cv_type,'cv_type','temperature conversion (0=constant,1=MESA,20=gas+rec)',iunit)
  endif
 
 end subroutine write_options_relax
@@ -858,6 +871,8 @@ end subroutine write_options_relax
 subroutine read_options_relax(db,nerr,relax,ieos)
  use infile_utils, only:inopts,read_inopt
  use dim,          only:do_radiation
+ use radiation_utils, only:exchange_radiation_energy,limit_radiation_flux,tol_rad,itsmax_rad,cv_type,kappa_cgs
+ use eos,          only:iopacity_type
  type(inopts), allocatable, intent(inout) :: db(:)
  integer,                   intent(inout) :: nerr
  logical,                   intent(in)    :: relax
@@ -870,6 +885,17 @@ subroutine read_options_relax(db,nerr,relax,ieos)
     call read_inopt(damp_radrelax,'damp_radrelax',db,errcount=nerr)
     call read_inopt(tol_radrelax,'tol_radrelax',db,errcount=nerr,min=0.)
     call read_inopt(maxits_radrelax,'maxits_radrelax',db,errcount=nerr,min=1)
+    ! Require explicit radiation settings when enabled. Missing keys trigger
+    ! the normal setup-file rewrite, making the effective defaults visible.
+    if (relax_radiation) then
+       call read_inopt(exchange_radiation_energy,'gas-rad_exchange',db,errcount=nerr)
+       call read_inopt(limit_radiation_flux,'flux_limiter',db,errcount=nerr)
+       call read_inopt(iopacity_type,'iopacity_type',db,errcount=nerr,min=-1,max=2)
+       if (iopacity_type==2) call read_inopt(kappa_cgs,'kappa_cgs',db,errcount=nerr,min=0.)
+       call read_inopt(tol_rad,'tol_rad',db,errcount=nerr,min=epsilon(tol_rad))
+       call read_inopt(itsmax_rad,'itsmax_rad',db,errcount=nerr,min=1)
+       call read_inopt(cv_type,'cv_type',db,errcount=nerr,min=0,max=20)
+    endif
  endif
 
 end subroutine read_options_relax

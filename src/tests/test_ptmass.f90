@@ -48,6 +48,7 @@ subroutine test_ptmass(ntests,npass,string)
  logical :: testall
 
  if (id==master) write(*,"(/,a,/)") '--> TESTING PTMASS MODULE'
+ call test_step_initialisation(ntests,npass)
 
  do_test_binary = .false.
  do_test_accretion = .false.
@@ -63,6 +64,8 @@ subroutine test_ptmass(ntests,npass,string)
  testall = .false.
  istart = 1
  select case(trim(string))
+ case('ptmassinit')
+    ! Only test initialisation of the timestep's sink integrator.
  case('ptmassbinary')
     do_test_binary = .true.
  case('ptmassgenrel')
@@ -186,6 +189,32 @@ subroutine test_ptmass(ntests,npass,string)
  if (id==master) write(*,"(/,a)") '<-- PTMASS TEST COMPLETE'
 
 end subroutine test_ptmass
+
+!-----------------------------------------------------------------------
+! Setup relaxation enters through init_step rather than init_evol. Both
+! sink integrators must have usable kick/drift coefficients on this path.
+!-----------------------------------------------------------------------
+subroutine test_step_initialisation(ntests,npass)
+ use ptmass,         only:ck,dk,use_fourthorder
+ use step_lf_global, only:init_step
+ integer, intent(inout) :: ntests,npass
+ integer :: itest,nerr(2)
+ logical :: fourthorder_prev
+
+ fourthorder_prev = use_fourthorder
+ do itest=1,2
+    use_fourthorder = (itest==2)
+    ck = 0.
+    dk = 0.
+    call init_step(0,0.,1.)
+    call checkval(sum(ck),1.,1.e-15,nerr(1),'init_step initialises drift coefficients')
+    call checkval(sum(dk),1.,1.e-15,nerr(2),'init_step initialises kick coefficients')
+    call update_test_scores(ntests,nerr,npass)
+ enddo
+ use_fourthorder = fourthorder_prev
+ call init_step(0,0.,1.)
+
+end subroutine test_step_initialisation
 
 !-----------------------------------------------------------------------
 !+

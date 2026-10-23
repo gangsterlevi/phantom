@@ -23,7 +23,8 @@ module radiation_implicit
 !   units
 !
  use part,            only:ikappa,ilambda,iedd,idkappa,iradxi,icv,ifluxx,ifluxy,ifluxz,igas,rho,massoftype,imu
- use eos,             only:iopacity_type,get_cv,eos_outputs_mu
+ use eos,             only:iopacity_type,get_cv,eos_outputs_mu,use_var_comp
+ use part,            only:iX,iZ,particle_eos_vars=>eos_vars
  use radiation_utils, only:get_kappa,tol_rad,itsmax_rad,cv_type
  implicit none
  integer, parameter :: ierr_failed_to_converge = 1,&
@@ -48,6 +49,21 @@ module radiation_implicit
  public :: tol_rad ! so that use radiation_implicit, only:tol_rad works
 
 contains
+
+! Use the same composition as the particle EoS when converting energy to
+! temperature. The implicit solver needs u/T, not the derivative du/dT.
+real function get_cv_particle(i,rhoi,ui) result(cv)
+ integer, intent(in) :: i
+ real, intent(in) :: rhoi,ui
+
+ if (cv_type==20 .and. use_var_comp) then
+    cv = get_cv(cv_type,rhoi,ui,X_local=particle_eos_vars(iX,i),Z_local=particle_eos_vars(iZ,i))
+ else
+    cv = get_cv(cv_type,rhoi,ui)
+ endif
+
+end function get_cv_particle
+
 
 !---------------------------------------------------------
 !+
@@ -130,7 +146,7 @@ subroutine save_radiation_energies(npart,rad,xyzh,vxyzu,radprop,drad,origEU,save
     origEU(2,i) = vxyzu(4,i)
     if (save_cv) then
        rhoi = rho(i)
-       radprop(icv,i) = get_cv(cv_type,rhoi,vxyzu(4,i))
+       radprop(icv,i) = get_cv_particle(i,rhoi,vxyzu(4,i))
        radprop(ikappa,i) = get_kappa(iopacity_type,vxyzu(4,i),radprop(icv,i),rhoi)
     endif
     drad(:,i) = 0.  ! Set dxi/dt = 0 for implicit scheme
@@ -153,7 +169,7 @@ subroutine do_radiation_onestep(dt,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,faile
  use derivutils, only:do_timing
  use implicit,   only:allocate_memory_implicit,icompactmax,ivar,ijvar,ncompact,ncompactlocal,&
                       varij,varij2,varinew,vari,mask
- use radiation_utils, only:implicit_radiation_store_drad
+ use radiation_utils, only:implicit_radiation_store_drad,exchange_radiation_energy
  real,    intent(in)    :: dt,xyzh(:,:),origEU(:,:)
  integer, intent(in)    :: npart
  real,    intent(inout) :: radprop(:,:),rad(:,:),vxyzu(:,:)
@@ -194,6 +210,7 @@ subroutine do_radiation_onestep(dt,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,faile
  !$omp shared(tlast,tcpulast,t1,tcpu1,ncompact,ncompactlocal,npart,icompactmax,dt,its_global) &
  !$omp shared(xyzh,vxyzu,ivar,ijvar,varinew,radprop,rad,vari,varij,varij2,origEU,EU0,mask,rho) &
  !$omp shared(pdvvisc,dvdx,nucleation,dust_temp,eos_vars,drad,fxyzu,implicit_radiation_store_drad) &
+ !$omp shared(exchange_radiation_energy) &
  !$omp shared(converged,maxerrE2,maxerrU2,maxerrE2last,maxerrU2last,itsmax_rad,moresweep,tol_rad,iverbose,ierr) &
  !$omp shared(maxerrE2last2,maxerrU2last2,maxerrE2prev2,maxerrU2prev2,omega,its)
  call fill_arrays(ncompact,ncompactlocal,npart,icompactmax,dt,&
@@ -470,7 +487,7 @@ subroutine fill_arrays(ncompact,ncompactlocal,npart,icompactmax,dt,xyzh,vxyzu,iv
 
        EU0(1,i) = rad(iradxi,i)
        EU0(2,i) = vxyzu(4,i)
-       EU0(3,i) = get_cv(cv_type,rhoi,vxyzu(4,i))
+       EU0(3,i) = get_cv_particle(i,rhoi,vxyzu(4,i))
        EU0(4,i) = get_kappa(iopacity_type,vxyzu(4,i),EU0(3,i),rhoi)
        !
        !--Diffuse ISM: Set dust temperature and opacity
@@ -510,7 +527,7 @@ subroutine fill_arrays(ncompact,ncompactlocal,npart,icompactmax,dt,xyzh,vxyzu,iv
           if (ind_timesteps) then
              EU0(1,j) = rad(iradxi,j)
              EU0(2,j) = vxyzu(4,j)
-             EU0(3,j) = get_cv(cv_type,rhoj,vxyzu(4,j))
+             EU0(3,j) = get_cv_particle(j,rhoj,vxyzu(4,j))
              EU0(4,j) = get_kappa(iopacity_type,vxyzu(4,j),EU0(3,j),rhoj)
           endif
 
@@ -726,6 +743,7 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
  use physcon, only:mass_proton_cgs
  use eos,     only:metallicity=>Z_in
  use part,    only:iphase,iamtype,iboundary
+ use radiation_utils, only:exchange_radiation_energy
  integer,      intent(in)    :: ivar(:,:),npart,ncompactlocal
  real,         intent(in)    :: vari(:,:),varinew(3,npart),rad(:,:),origEU(:,:)
  real(kind=4), intent(in)    :: pdvvisc(:),dvdx(:,:)
@@ -870,6 +888,8 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
        Tgas4 = Tgas**4
        Trad4 = rhoi*Ei/a_code
        ck  = c_code*opacityi
+       ! Disable matter-radiation exchange without changing the diffusion opacity.
+       if (.not.exchange_radiation_energy) ck = 0.
        ack = a_code*ck
 
        betaval  = ck*rhoi*dti
@@ -900,6 +920,13 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
           cycle main_loop
        endif
 
+       if (.not.skip_quartic .and. u4term==0.) then
+          ! Without exchange the gas equation is linear; normalising the
+          ! quartic by u4term would divide by zero.
+          U1i = -u0term/u1term
+          U1i = (1.-omega)*EU0(2,i) + omega*U1i
+          skip_quartic = .true.
+       endif
        if (.not. skip_quartic) then
           u1term = u1term/u4term
           u0term = u0term/u4term
@@ -1006,7 +1033,7 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
        if (.not. iamtype(iphase(i))==iboundary) then
           EU0(1,i) = E1i
           EU0(2,i) = U1i
-          EU0(3,i) = get_cv(cv_type,rhoi,U1i)
+          EU0(3,i) = get_cv_particle(i,rhoi,U1i)
           EU0(4,i) = get_kappa(iopacity_type,U1i,EU0(3,i),rhoi)
        endif
 
@@ -1102,14 +1129,14 @@ subroutine set_heating_cooling_low_rhoT(i,eradi,ugasi,orig_eradi,orig_ugasi,cvi,
  if (.true.) then
     try_loop: do itry = 1,2
        u_found = ugasi  ! ugasi = EU0(2,i)
-       t_found = ugasi/get_cv(cv_type,rhoi,u_found)
+       t_found = ugasi/get_cv_particle(i,rhoi,u_found)
        t_orig = t_found
        do iterationloop = 1,100
           u_last = u_found
           t_last = t_found
 
           u_found = get_u_from_rhoT(rhoi,t_found,ieos)
-          cv1 = get_cv(cv_type,rhoi,u_found)
+          cv1 = get_cv_particle(i,rhoi,u_found)
           t_found = u_found/cv1
           !
           !--For calculating numerical derivative with gas temperature,

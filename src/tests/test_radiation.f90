@@ -105,7 +105,7 @@ subroutine test_exchange_terms(ntests,npass,use_implicit)
  integer(kind=8) :: nptot
  logical, parameter :: write_output = .false.
  character(len=12) :: string,filestr
- real :: step,log_start
+ real :: step,log_start,u_before,xi_before
 
  call init_part()
  iverbose = 0
@@ -163,6 +163,24 @@ subroutine test_exchange_terms(ntests,npass,use_implicit)
        luminosity(i)     = 0.
     enddo
 
+    if (use_implicit) then
+       ! With uniform radiation and no work terms, disabling exchange must
+       ! preserve both energies even when the gas and radiation are not in LTE.
+       exchange_radiation_energy = .false.
+       u_before = vxyzu(4,1)
+       xi_before = rad(iradxi,1)
+       call do_radiation_implicit(1.e-12*seconds/utime,npart,rad,xyzh,vxyzu,radprop,drad,ierr)
+       call checkval(ierr,0,0,nerr(1),'implicit exchange disabled: solver status')
+       call update_test_scores(ntests,nerr,npass)
+       call checkval(maxval(abs(vxyzu(4,1:npart)/u_before-1.)),0.,1.e-12,nerr(1),&
+                     'implicit exchange disabled: gas energy unchanged')
+       call update_test_scores(ntests,nerr,npass)
+       call checkval(maxval(abs(rad(iradxi,1:npart)/xi_before-1.)),0.,1.e-12,nerr(1),&
+                     'implicit exchange disabled: radiation energy unchanged')
+       call update_test_scores(ntests,nerr,npass)
+       exchange_radiation_energy = .true.
+    endif
+
     if (write_output) then
        write(filestr,"(i2.2)") itest
        open(unit=23+itest,file='radiation-test'//trim(filestr)//trim(adjustl(string))//'.ev')
@@ -217,7 +235,59 @@ subroutine test_exchange_terms(ntests,npass,use_implicit)
     if (write_output) close(23+itest)
  enddo
 
+ if (use_implicit) call test_exchange_equilibrium_composition(ntests,npass)
+
 end subroutine test_exchange_terms
+
+! A uniform radiation field in LTE must remain in equilibrium even when
+! particles have different compositions from the global EoS defaults.
+subroutine test_exchange_equilibrium_composition(ntests,npass)
+ use part, only:npart,xyzh,vxyzu,rad,radprop,drad,rho,eos_vars,iX,iZ,dvdx,luminosity
+ use radiation_utils, only:cv_type,radxi_from_Trad
+ use radiation_implicit, only:do_radiation_implicit
+ use eos, only:use_var_comp
+ use eos_gasradrec, only:init_eos_gasradrec,calc_uP_from_rhoT_gasradrec
+ use units, only:unit_density,unit_ergg,utime
+ integer, intent(inout) :: ntests,npass
+ integer :: i,itest,ierr,nerr(3),cv_prev
+ logical :: var_comp_prev
+ real :: temp,ui,pi,imui
+ real, allocatable :: u0(:),xi0(:)
+
+ allocate(u0(npart),xi0(npart))
+ cv_prev = cv_type
+ var_comp_prev = use_var_comp
+ cv_type = 20
+ use_var_comp = .true.
+ call init_eos_gasradrec(ierr)
+ dvdx = 0.
+ luminosity = 0.
+ do itest=1,2
+    temp = 10.**(3+itest)
+    do i=1,npart
+       eos_vars(iX,i) = 0.
+       if (mod(i,2)==0) eos_vars(iX,i) = 0.35
+       eos_vars(iZ,i) = 0.02
+       call calc_uP_from_rhoT_gasradrec(rho(i)*unit_density,temp,eos_vars(iX,i),&
+                                      1.-eos_vars(iX,i)-eos_vars(iZ,i),ui,pi,imui,do_radiation=.true.)
+       vxyzu(4,i) = ui/unit_ergg
+       rad(iradxi,i) = radxi_from_Trad(rho(i),temp)
+    enddo
+    u0 = vxyzu(4,1:npart)
+    xi0 = rad(iradxi,1:npart)
+    call do_radiation_implicit(1.e-3/utime,npart,rad,xyzh,vxyzu,radprop,drad,ierr)
+    call checkval(ierr,0,0,nerr(1),'composition-dependent LTE: solver status')
+    call checkval(maxval(abs(vxyzu(4,1:npart)/u0-1.)),0.,1.e-8,nerr(2),&
+                  'composition-dependent LTE: gas energy unchanged')
+    call checkval(maxval(abs(rad(iradxi,1:npart)/xi0-1.)),0.,1.e-8,nerr(3),&
+                  'composition-dependent LTE: radiation energy unchanged')
+    call update_test_scores(ntests,nerr,npass)
+ enddo
+ cv_type = cv_prev
+ use_var_comp = var_comp_prev
+ deallocate(u0,xi0)
+
+end subroutine test_exchange_equilibrium_composition
 
 !---------------------------------------------------------
 !+

@@ -1307,7 +1307,8 @@ real function get_cv(cv_type,rho,u,mu_local,X_local,Z_local,gamma_local) result(
     call equationofstate_gasradrec(rho_cgs,rho_cgs*u_cgs,temp,imu,X,1.-X-Z,pres_cgs,&
                                    cs_cgs,gamma_eff,cveff,do_radiation=do_radiation)
 
-    ! cv is technically (∂u/∂T)_s, but we return u/T as this is needed for the radiation module)
+    ! The radiation module needs the effective ratio u/T here, not the
+    ! thermodynamic heat capacity du/dT.
     if (do_radiation) then  ! assumes input u only contains gas (+ ionisation) energy components
        cv = u/temp
     else  ! cannot use u directly as it includes radiation component
