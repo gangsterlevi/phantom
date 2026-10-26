@@ -45,6 +45,7 @@ subroutine test_setstar(ntests,npass)
 
  ! test the get_mass_coordinate routine in relax_star
  call test_get_mass_coord(ntests,npass)
+ call test_constant_entropy_core(ntests,npass)
 
  ! test polytrope
  if (.not. do_radiation) call test_polytrope(ntests,npass)
@@ -56,6 +57,55 @@ subroutine test_setstar(ntests,npass)
  call test_whitedwarf(ntests,npass)
 
 end subroutine test_setstar
+
+! Check the shooting solve from different guesses, including zero (which
+! multiplicative mass updates cannot escape), and closure of the output mass.
+subroutine test_constant_entropy_core(ntests,npass)
+ use datafiles, only:find_phantom_datafile
+ use readwrite_mesa, only:read_mesa
+ use setfixedentropycore, only:set_fixedS_softened_core
+ use table_utils, only:interpolator
+ use physcon, only:solarr,solarm
+ use eos, only:entropy,get_mean_molecular_weight
+ integer, intent(inout) :: ntests,npass
+ real, allocatable :: rho(:),r(:),pres(:),m(:),en(:),temp(:),X(:),Y(:),mu(:)
+ real :: mt,mc,rc,mh,mc_ref,Sc,muc,errS
+ integer :: itest,icore,i,ierr,nerr(1)
+ character(len=500) :: filename
+
+ filename = find_phantom_datafile('P12_Phantom_Profile.data','star_data_files')
+ mc_ref = 0.
+ do itest=1,3
+    call read_mesa(filename,rho,r,pres,m,en,temp,0.7,0.02,X,Y,mu,mt,ierr,cgsunits=.true.)
+    call checkval(ierr,0,0,nerr(1),'read constant-entropy core test profile')
+    call update_test_scores(ntests,nerr,npass)
+    if (ierr/=0) return
+    rc = 0.1*r(size(r))/solarr
+    call interpolator(r,rc*solarr,icore)
+    mh = m(icore)
+    mc = 0.5*mh/solarm
+    if (itest==2) mc = 0.
+    if (itest==3) mc = 0.9*mh/solarm
+    muc = get_mean_molecular_weight(X(icore),1.-X(icore)-Y(icore))
+    Sc = entropy(rho(icore),pres(icore),muc,2)
+    call set_fixedS_softened_core(12,mc,rc,rho,r,pres,m,X(icore),Y(icore),ierr)
+    call checkval(ierr,0,0,nerr(1),'constant-entropy core converges')
+    call update_test_scores(ntests,nerr,npass)
+    if (ierr/=0) return
+    call checkval((m(icore)-mh)/(mh-mc*solarm),0.,1.e-10,nerr(1),'softened gas mass closes at boundary')
+    call update_test_scores(ntests,nerr,npass)
+    if (itest==1) mc_ref = mc
+    call checkval(mc,mc_ref,1.e-10,nerr(1),'core mass independent of initial guess')
+    call update_test_scores(ntests,nerr,npass)
+    errS = 0.
+    do i=1,icore
+       errS = max(errS,abs((entropy(rho(i),pres(i),muc,2)-Sc)/Sc))
+    enddo
+    call checkval(errS,0.,1.e-8,nerr(1),'softened core preserves boundary entropy')
+    call update_test_scores(ntests,nerr,npass)
+    deallocate(rho,r,pres,m,en,temp,X,Y,mu)
+ enddo
+end subroutine test_constant_entropy_core
 
 !-----------------------------------------------------------------------
 !+

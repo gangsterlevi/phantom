@@ -23,7 +23,7 @@ module setfixedentropycore
  public :: set_fixedS_softened_core,calc_mass_from_rho,gcore
 
  private
- integer, parameter :: ierr_pres=1,ierr_rho=2,ierr_mass=3
+ integer, parameter :: ierr_pres=1,ierr_rho=2,ierr_mass=3,ierr_convergence=4
 
 contains
 
@@ -41,16 +41,20 @@ subroutine set_fixedS_softened_core(eos_type,mcore,rcore,rho,r,pres,m,Xcore,Ycor
  real,    intent(inout) :: r(:),rho(:),m(:),pres(:),mcore
  real,    intent(in)    :: rcore,Xcore,Ycore
  integer, intent(out)   :: ierr
- real, allocatable    :: r_alloc(:),rho_alloc(:),pres_alloc(:)
+ real, allocatable    :: r_alloc(:),rho_alloc(:),pres_alloc(:),m_alloc(:)
  real                 :: mc,msoft,rc
  integer              :: icore,iverbose
 
  ierr = 0
+ if (mcore < 0.) then
+    ierr = ierr_convergence
+    return
+ endif
  rc = rcore*solarr  ! convert to cm
  mc = mcore*solarm  ! convert to g
  call interpolator(r,rc,icore)  ! find index in r closest to rc
  msoft = m(icore) - mc
- if (msoft<0.) call fatal('setup','mcore cannot exceed m(r=h)')
+ if (msoft<=0.) call fatal('setup','mcore cannot exceed m(r=h)')
 
  if (do_radiation) then
     ientropy = 2
@@ -75,14 +79,17 @@ subroutine set_fixedS_softened_core(eos_type,mcore,rcore,rho,r,pres,m,Xcore,Ycor
  allocate(pres_alloc(0:icore+1))
  pres_alloc(icore:icore+1) = pres(icore:icore+1)
  iverbose = 0
- call calc_rho_and_pres(r_alloc,mc,m(icore),rho_alloc,pres_alloc,Xcore,Ycore,iverbose)
+ call calc_rho_and_pres(r_alloc,mc,m(icore),rho_alloc,pres_alloc,Xcore,Ycore,iverbose,ierr)
+ if (ierr /= 0) return
  mcore = mc / solarm
  write(*,'(1x,a,f12.5,a)') 'Obtained core mass of ',mcore,' Msun'
  write(*,'(1x,a,f12.5,a)') 'Softened mass is ',m(icore)/solarm-mcore,' Msun'
  rho(1:icore)  = rho_alloc(1:icore)
  pres(1:icore) = pres_alloc(1:icore)
- call calc_mass_from_rho(r(1:icore),rho(1:icore),m(1:icore))
- m(1:icore) = m(1:icore) + mc
+ ! Include the central shell, using the same quadrature as the shooting solve.
+ allocate(m_alloc(icore+1))
+ call calc_mass_from_rho(r_alloc(0:icore),rho_alloc(0:icore),m_alloc)
+ m(1:icore) = m_alloc(2:icore+1) + mc
 
 end subroutine set_fixedS_softened_core
 
@@ -91,16 +98,19 @@ end subroutine set_fixedS_softened_core
 !  Returns softened core profile with fixed entropy
 !+
 !-----------------------------------------------------------------------
-subroutine calc_rho_and_pres(r,mcore,mh,rho,pres,Xcore,Ycore,iverbose)
+subroutine calc_rho_and_pres(r,mcore,mh,rho,pres,Xcore,Ycore,iverbose,ierr_out)
  use eos, only:entropy,get_mean_molecular_weight
+ use, intrinsic :: ieee_arithmetic, only:ieee_is_finite
  real, allocatable, intent(in)    :: r(:)
  integer,           intent(in)    :: iverbose
  real,              intent(in)    :: mh,Xcore,Ycore
  real,              intent(inout) :: mcore
  real, allocatable, intent(inout) :: rho(:),pres(:)
+ integer, intent(out)                           :: ierr_out
  integer                                        :: Nmax,it,ierr
- real                                           :: Sc,mass,mold,msoft,fac,mu
- integer, parameter :: it_max = 5001
+ real                                           :: Sc,mass,msoft,mu,mc_lo,mc_hi,mc_next
+ integer, parameter :: it_max = 100
+ real, parameter :: tol_mass = 1.e-10
 
 ! INSTRUCTIONS
 
@@ -116,41 +126,45 @@ subroutine calc_rho_and_pres(r,mcore,mh,rho,pres,Xcore,Ycore,iverbose)
  Nmax  = size(rho)-1 ! Index corresponding to r = h
  mu = get_mean_molecular_weight(Xcore,1.-Xcore-Ycore)
  Sc = entropy(rho(Nmax),pres(Nmax),mu,ientropy)
+ rho(0:Nmax-1) = rho(Nmax)
+ pres(0:Nmax-1) = pres(Nmax)
 
- ! Start shooting method
- fac  = 0.05
- mass = msoft
- it = 0
-
- do while (it < it_max)
-    mold = mass
-    ierr = 0
-    call one_shot(Sc,r,mcore,msoft,mu,rho,pres,mass,iverbose,ierr) ! returned mass is m(r=0)
-    it = it + 1
-
-    if (mass < 0.) then
-       mcore = mcore * (1. - fac)
-    elseif (mass/msoft < 1d-10) then  ! m(r=0) sufficiently close to zero
-       exit
-    else
-       mcore = mcore * (1. + fac)
-    endif
+ ! Bisect the physical core-mass interval. An exhausted gas mass means
+ ! the trial core is too massive; a positive central residual means too small.
+ ! Unlike multiplicative updates, this remains bounded and cannot stall at zero.
+ mc_lo = 0.
+ mc_hi = mh
+ ierr_out = ierr_convergence
+ do it = 1,it_max
     msoft = mh - mcore
-    if (mold * mass < 0.) fac = fac * 0.5
-
-    if (abs(mold-mass) < tiny(0.) .and. ierr /= ierr_pres .and. ierr /= ierr_mass) then
-       write(*,'(/,1x,a,e12.5)') 'WARNING: Converged on mcore without reaching tolerance on zero'// &
-                                 'central mass. m(r=0)/msoft = ',mass/msoft
-       write(*,'(/,1x,a,i4,a,e12.5)') 'Reached iteration ',it,', fac=',fac
+    ierr = 0
+    call one_shot(Sc,r,mcore,msoft,mu,rho,pres,mass,iverbose,ierr)
+    if (.not.ieee_is_finite(mass) .or. any(.not.ieee_is_finite(rho)) .or. &
+        any(.not.ieee_is_finite(pres))) exit
+    ! A density inversion is diagnostic, as in the original shooting method;
+    ! pressure failure or an incomplete integration must never count as closure.
+    if ((ierr==0 .or. ierr==ierr_rho) .and. abs(mass) <= tol_mass*msoft) then
+       ierr_out = 0
+       write(*,'(1x,a,i0,a,es12.5)') 'Core mass converged in ',it, &
+                                   ' iterations; central mass / softened mass = ',mass/msoft
+       return
+    endif
+    if (ierr==ierr_pres) then
+       ierr_out = ierr
        exit
     endif
-
-    if (iverbose > 0) write(*,'(1x,i5,4(2x,a,e12.5))') it,'m(r=0) = ',mass,'mcore = ',mcore,'fac = ',fac
+    if (mass < 0.) then
+       mc_hi = mcore
+    else
+       mc_lo = mcore
+    endif
+    mc_next = mc_lo + 0.5*(mc_hi-mc_lo)
+    if (mc_next==mcore .or. mc_next==mc_lo .or. mc_next==mc_hi) exit
+    mcore = mc_next
+    if (iverbose > 0) write(*,'(1x,i5,2(a,e12.5))') it,' m(r=0) = ',mass,' mcore = ',mcore
  enddo
-
- if (it >= it_max) then
-    write(*,'(/,1x,a,e12.5)') 'WARNING: Failed to converge on mcore! m(r=0)/msoft = ',mass/msoft
- endif
+ write(*,'(/,1x,a,i0,a,es12.5)') 'WARNING: Constant-entropy core solve failed (status ', &
+                               ierr_out,'); central mass / softened mass = ',mass/msoft
 
 end subroutine calc_rho_and_pres
 
@@ -173,6 +187,7 @@ subroutine one_shot(Sc,r,mcore,msoft,mu,rho,pres,mass,iverbose,ierr)
  real, allocatable :: dr(:),dvol(:)
 
  Nmax = size(rho)-1
+ ierr = 0
  allocate(dr(1:Nmax+1),dvol(1:Nmax+1))
 
  ! Pre-fill arrays

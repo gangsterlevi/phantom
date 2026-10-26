@@ -27,6 +27,17 @@ If interruptted during the relaxation, run ``phantomsetup`` again and it will pi
 
 If in doubt, you can always run the star in isolation for a few years to see if relaxation procedure worked.
 
+Constant-entropy core replacement
+---------------------------------
+
+The constant-entropy core option adjusts the sink mass to match the enclosed
+mass at the replacement boundary. A bounded bisection solve requires the
+residual central gas mass to be less than ``1.e-10`` times the gas mass in
+the softened region. This is a mass-closure tolerance, not a measure of the
+radial profile's discretisation error. The reconstructed mass profile includes
+the innermost gas shell. If the solve fails, setup reports an error rather
+than using an unconverged profile.
+
 Radiative relaxation
 --------------------
 
