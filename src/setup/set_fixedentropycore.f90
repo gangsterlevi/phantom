@@ -71,13 +71,13 @@ subroutine set_fixedS_softened_core(eos_type,mcore,rcore,rho,r,pres,m,Xcore,Ycor
  endif
 
  ! Make allocatable copies, see instructions of calc_rho_and_pres
- allocate(r_alloc(0:icore+1))
+ allocate(r_alloc(0:icore))
  r_alloc(0) = 0.
- r_alloc(1:icore+1) = r(1:icore+1)
+ r_alloc(1:icore) = r(1:icore)
  allocate(rho_alloc(0:icore))
  rho_alloc(icore) = rho(icore)
- allocate(pres_alloc(0:icore+1))
- pres_alloc(icore:icore+1) = pres(icore:icore+1)
+ allocate(pres_alloc(0:icore))
+ pres_alloc(icore) = pres(icore)
  iverbose = 0
  call calc_rho_and_pres(r_alloc,mc,m(icore),rho_alloc,pres_alloc,Xcore,Ycore,iverbose,ierr)
  if (ierr /= 0) return
@@ -116,11 +116,11 @@ subroutine calc_rho_and_pres(r,mcore,mh,rho,pres,Xcore,Ycore,iverbose,ierr_out)
 
 ! Input variables should be given in the following format:
 
-! r(0:Nmax+1): Array of radial grid to be softened, satisfying r(0)=0 and r(Nmax)=rcore
+! r(0:Nmax):   Array of radial grid to be softened, satisfying r(0)=0 and r(Nmax)=rcore
 ! mcore:       Core particle mass, need to provide initial guess
 ! mh:          Mass coordinate at rcore, m(r=rcore)
 ! rho(0:Nmax): Give rho(Nmax)=(rho at rcore) as input. Outputs density profile.
-! p(0:Nmax+1): Give p(Nmax:Nmax+1)=(p at r(Nmax:Nmax+1)) as input. Outputs pressure profile.
+! p(0:Nmax):   Give p(Nmax)=(p at rcore) as input. Outputs pressure profile.
 
  msoft = mh - mcore
  Nmax  = size(rho)-1 ! Index corresponding to r = h
@@ -149,10 +149,9 @@ subroutine calc_rho_and_pres(r,mcore,mh,rho,pres,Xcore,Ycore,iverbose,ierr_out)
                                    ' iterations; central mass / softened mass = ',mass/msoft
        return
     endif
-    if (ierr==ierr_pres) then
-       ierr_out = ierr
-       exit
-    endif
+    ! A pressure-inverted trial is incomplete, but its remaining mass still
+    ! guides the search, as in the original shooting method. Do not accept
+    ! it as convergence or abort before trying a different core mass.
     if (mass < 0.) then
        mc_hi = mcore
     else
@@ -183,15 +182,15 @@ subroutine one_shot(Sc,r,mcore,msoft,mu,rho,pres,mass,iverbose,ierr)
  real,              intent(out)   :: mass
  integer,           intent(out)   :: ierr
  integer                                        :: i,Nmax
- real                                           :: rcore,rhoguess
+ real                                           :: rcore,rhoguess,gouter,ginner,predict_rho,predict_mass,predict_pres
  real, allocatable :: dr(:),dvol(:)
 
  Nmax = size(rho)-1
  ierr = 0
- allocate(dr(1:Nmax+1),dvol(1:Nmax+1))
+ allocate(dr(1:Nmax),dvol(1:Nmax))
 
  ! Pre-fill arrays
- do i = 1,Nmax+1
+ do i = 1,Nmax
     dr(i) = r(i)-r(i-1)
     dvol(i) = 4.*pi/3. * (r(i)**3 - r(i-1)**3)
  enddo
@@ -200,11 +199,18 @@ subroutine one_shot(Sc,r,mcore,msoft,mu,rho,pres,mass,iverbose,ierr)
  mass  = msoft
 
  do i = Nmax, 1, -1
-    pres(i-1) = ( dr(i) * dr(i+1) * sum(dr(i:i+1)) &
-                * rho(i) * gg * (mass/r(i)**2 + mcore * gcore(r(i),rcore)) &
-                + dr(i)**2 * pres(i+1) &
-                + ( dr(i+1)**2 - dr(i)**2) * pres(i) ) / dr(i+1)**2
-    rhoguess = rho(i)
+    ! Integrate dP/dr=-rho*g with an explicit trapezoidal predictor/corrector.
+    ! The old three-point recurrence subtracts nearly equal pressures and
+    ! amplifies alternating errors on a nonuniform grid near the centre.
+    gouter = gg * (mass/r(i)**2 + mcore*gcore(r(i),rcore))
+    predict_pres = pres(i) + dr(i)*rho(i)*gouter
+    predict_rho = rho(i)
+    call get_rho_from_p_s(predict_pres,Sc,predict_rho,mu,rho(i),ientropy)
+    predict_mass = mass - 0.5*(rho(i)+predict_rho)*dvol(i)
+    ginner = 0.
+    if (i > 1) ginner = gg * (max(0.,predict_mass)/r(i-1)**2 + mcore*gcore(r(i-1),rcore))
+    pres(i-1) = pres(i) + 0.5*dr(i)*(rho(i)*gouter + predict_rho*ginner)
+    rhoguess = predict_rho
     call get_rho_from_p_s(pres(i-1),Sc,rho(i-1),mu,rhoguess,ientropy)
     mass = mass - 0.5*(rho(i)+rho(i-1)) * dvol(i)
 

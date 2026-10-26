@@ -75,13 +75,21 @@ subroutine test_constant_entropy_core(ntests,npass)
 
  filename = find_phantom_datafile('P12_Phantom_Profile.data','star_data_files')
  mc_ref = 0.
- do itest=1,3
+ do itest=1,4
     call read_mesa(filename,rho,r,pres,m,en,temp,0.7,0.02,X,Y,mu,mt,ierr,cgsunits=.true.)
     call checkval(ierr,0,0,nerr(1),'read constant-entropy core test profile')
     call update_test_scores(ntests,nerr,npass)
     if (ierr/=0) return
     rc = 0.1*r(size(r))/solarr
     call interpolator(r,rc*solarr,icore)
+    ! Strongly nonuniform central spacing exposes cancellation/alternating
+    ! errors in a pressure recurrence based on neighbouring absolute values.
+    if (itest==4) then
+       do i=1,icore-1
+          r(i) = r(icore)*(real(i)/real(icore))**2
+       enddo
+       call interpolator(r,rc*solarr,icore)
+    endif
     mh = m(icore)
     mc = 0.5*mh/solarm
     if (itest==2) mc = 0.
@@ -95,7 +103,11 @@ subroutine test_constant_entropy_core(ntests,npass)
     call checkval((m(icore)-mh)/(mh-mc*solarm),0.,1.e-10,nerr(1),'softened gas mass closes at boundary')
     call update_test_scores(ntests,nerr,npass)
     if (itest==1) mc_ref = mc
-    call checkval(mc,mc_ref,1.e-10,nerr(1),'core mass independent of initial guess')
+    if (itest<=3) then
+       call checkval(mc,mc_ref,1.e-10,nerr(1),'core mass independent of initial guess')
+       call update_test_scores(ntests,nerr,npass)
+    endif
+    call checkval(all(pres(1:icore-1)>=pres(2:icore)),.true.,nerr(1),'core pressure increases inward')
     call update_test_scores(ntests,nerr,npass)
     errS = 0.
     do i=1,icore
