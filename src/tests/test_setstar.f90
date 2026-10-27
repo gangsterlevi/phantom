@@ -15,8 +15,8 @@ module testsetstar
 ! :Runtime parameters: None
 !
 ! :Dependencies: checksetup, datafiles, dim, eos, io, mpidomain, options,
-!   part, physcon, radiation_utils, readwrite_mesa, relaxstar, setstar,
-!   setstar_utils, sortutils, table_utils, testutils, units
+!   orbits, part, physcon, radiation_utils, readwrite_mesa, relaxstar, setorbit,
+!   setstar, setstar_utils, sortutils, table_utils, testutils, units, vectorutils
 !
  use testutils, only:checkval,update_test_scores
  implicit none
@@ -45,7 +45,9 @@ subroutine test_setstar(ntests,npass)
 
  ! test the get_mass_coordinate routine in relax_star
  call test_get_mass_coord(ntests,npass)
+ call test_radrelax_energy_change(ntests,npass)
  call test_constant_entropy_core(ntests,npass)
+ call test_stellar_orbital_placement(ntests,npass)
 
  ! test polytrope
  if (.not. do_radiation) call test_polytrope(ntests,npass)
@@ -57,6 +59,145 @@ subroutine test_setstar(ntests,npass)
  call test_whitedwarf(ntests,npass)
 
 end subroutine test_setstar
+
+! Check that gas-radiation exchange cancels locally, while energy moving
+! between particles cannot hide evolution. Exclude other bodies and dead gas.
+subroutine test_radrelax_energy_change(ntests,npass)
+ use relaxstar, only:get_radrelax_energy_change
+ use part, only:massoftype,igas,aprmassoftype,apr_level
+ use dim, only:use_apr
+ integer, intent(inout) :: ntests,npass
+ real :: xyzh(4,5),u(5),xi(5),u0(5),xi0(5),change,energy,rmax,mass_prev,energy_ref
+ real :: apr_mass_prev(size(aprmassoftype,2))
+ integer :: nerr(1)
+ integer(kind=1) :: levels_prev(5)
+
+ mass_prev = massoftype(igas)
+ massoftype(igas) = 2.
+ if (use_apr) then
+    apr_mass_prev = aprmassoftype(igas,:)
+    levels_prev = apr_level(1:5)
+    aprmassoftype(igas,:) = 2.
+    apr_level(1:5) = 1
+ endif
+ xyzh = 0.
+ xyzh(4,:) = 1.
+ xyzh(1,:) = [1000.,1.,2.,3.,1000.]
+ xyzh(4,5) = -1.
+ u0 = 10.
+ xi0 = 4.
+ u = u0
+ xi = xi0
+ ! Changes on another body and a dead particle must not enter the diagnostic.
+ u(1) = 1000.
+ u(5) = 1000.
+ call get_radrelax_energy_change(1,5,xyzh,u,xi,u0,xi0,change,energy_ref,rmax)
+ call checkval(change,0.,1.e-14,nerr(1),'radiative error excludes other bodies and dead particles')
+ call update_test_scores(ntests,nerr,npass)
+ call checkval(energy_ref,84.,1.e-14,nerr(1),'radiative reference includes active gas and photons with mass weights')
+ call update_test_scores(ntests,nerr,npass)
+ call checkval(rmax,3.,1.e-14,nerr(1),'radiative radius excludes other bodies and dead particles')
+ call update_test_scores(ntests,nerr,npass)
+
+ u(2) = u0(2)-2.
+ xi(2) = xi0(2)+2.
+ call get_radrelax_energy_change(1,5,xyzh,u,xi,u0,xi0,change,energy,rmax)
+ call checkval(change,0.,1.e-14,nerr(1),'local gas-photon exchange cancels in combined energy error')
+ call update_test_scores(ntests,nerr,npass)
+
+ u(3) = u0(3)+1.
+ u(4) = u0(4)-1.
+ call get_radrelax_energy_change(1,5,xyzh,u,xi,u0,xi0,change,energy,rmax)
+ call checkval(change,4.,1.e-14,nerr(1),'energy redistribution cannot cancel between particles')
+ call update_test_scores(ntests,nerr,npass)
+ call checkval(energy,energy_ref,1.e-14,nerr(1),'redistribution preserves total thermal energy')
+ call update_test_scores(ntests,nerr,npass)
+
+ call get_radrelax_energy_change(1,5,xyzh,10.*u,10.*xi,10.*u0,10.*xi0,change,energy,rmax)
+ call checkval(change/energy,4./energy_ref,1.e-14,nerr(1),'fractional radiative error independent of energy units')
+ call update_test_scores(ntests,nerr,npass)
+ massoftype(igas) = mass_prev
+ if (use_apr) then
+    aprmassoftype(igas,:) = apr_mass_prev
+    apr_level(1:5) = levels_prev
+ endif
+
+end subroutine test_radrelax_energy_change
+
+! Test the final stellar centres and velocities, not only the Keplerian
+! elements: synchronous spin must preserve the body's orbital translation.
+subroutine test_stellar_orbital_placement(ntests,npass)
+ use setstar, only:star_t,set_defaults_star,centre_stars_for_orbit,shift_stars,ipoly
+ use setorbit, only:orbit_t,set_roche_lobe_orbit,set_orbit
+ use part, only:massoftype,igas,iphase,set_particle_type,aprmassoftype,apr_level
+ use dim, only:use_apr
+ use vectorutils, only:cross_product3D
+ use orbits, only:get_eccentricity
+ integer, intent(inout) :: ntests,npass
+ type(star_t) :: stars(2)
+ type(orbit_t) :: orbit
+ real :: xyz(4,2),vel(4,2),sinks(6,2),vsinks(3,2),orbxyz(6,2),orbvel(3,2)
+ real :: mass_prev,omega(3),vspin(3),xcm(3),vcm(3),dx(3),dv(3)
+ real :: apr_mass_prev(size(aprmassoftype,2))
+ integer(kind=kind(apr_level)) :: levels_prev(2)
+ integer :: i,ierr,ns,norb,types(8),nerr(7)
+ integer(kind=kind(iphase)) :: phase_prev(2)
+
+ mass_prev = massoftype(igas)
+ phase_prev = iphase(1:2)
+ massoftype(igas) = 1.
+ if (use_apr) then
+    apr_mass_prev = aprmassoftype(igas,:)
+    levels_prev = apr_level(1:2)
+    aprmassoftype(igas,:) = 1.
+    apr_level(1:2) = 1
+ endif
+ do i=1,2
+    call set_defaults_star(stars(i))
+    call set_particle_type(i,4) ! star 1's temporary tag
+ enddo
+ stars(1)%iprofile = ipoly
+ stars(1)%isinkcore = .true.
+ stars(2)%iprofile = 0
+ stars(2)%m = '1.0'
+ xyz = 0.; vel = 0.; sinks = 0.; vsinks = 0.
+ xyz(1,:) = [9.,11.]
+ xyz(4,:) = 1.
+ vel(1,:) = 0.3; vel(2,:) = 0.4
+ sinks(1,1) = 10.5
+ sinks(4,1) = 2.
+ vsinks(:,1) = [0.3,0.4,0.]
+ call centre_stars_for_orbit(2,stars,2,xyz,vel,sinks,vsinks)
+ call checkval(stars(1)%r_particles_code,1.25,1.e-13,nerr(1),'donor radius is measured about gas-plus-core centre')
+ call set_roche_lobe_orbit(orbit,4.,1.,stars(1)%r_particles_code,10.,ierr)
+ norb = 0
+ call set_orbit(orbit,4.,1.,0.,0.,orbxyz,orbvel,norb,.false.,ierr)
+ types = 0; types(4) = 2
+ ns = 1
+ call shift_stars(2,stars,orbxyz,orbvel,xyz,vel,sinks,vsinks,2,types,ns,corotate=.true.)
+ xcm = (sum(xyz(1:3,:),dim=2)+2.*sinks(1:3,1))/4.
+ vcm = (sum(vel(1:3,:),dim=2)+2.*vsinks(:,1))/4.
+ call checkval(maxval(abs(xcm-orbxyz(1:3,1))),0.,1.e-12,nerr(2),'stellar centre follows requested orbit')
+ call checkval(maxval(abs(vcm-orbvel(:,1))),0.,1.e-12,nerr(3),'synchronous spin preserves orbital velocity')
+ call cross_product3D(orbxyz(1:3,1),orbvel(:,1),omega)
+ omega = omega/dot_product(orbxyz(1:3,1),orbxyz(1:3,1))
+ call cross_product3D(omega,xyz(1:3,1)-xcm,vspin)
+ call checkval(maxval(abs(vel(1:3,1)-vcm-vspin)),0.,1.e-12,nerr(4),'stellar spin has prograde omega cross r sign')
+ call checkval(maxval(abs(sinks(1:3,1)-orbxyz(1:3,1)-[0.25,0.,0.])),0.,1.e-12,nerr(5), &
+               'orbital placement preserves internal core offset')
+ dx = sinks(1:3,2)-xcm
+ dv = vsinks(:,2)-vcm
+ call checkval(get_eccentricity(5.,dx,dv),0.,1.e-11,nerr(6),'final stellar centres have a circular orbit')
+ call checkval(ns,2,0,nerr(7),'point companion is created alongside the donor core')
+ call update_test_scores(ntests,nerr,npass)
+ massoftype(igas) = mass_prev
+ iphase(1:2) = phase_prev
+ if (use_apr) then
+    aprmassoftype(igas,:) = apr_mass_prev
+    apr_level(1:2) = levels_prev
+ endif
+
+end subroutine test_stellar_orbital_placement
 
 ! Check the shooting solve from different guesses, including zero (which
 ! multiplicative mass updates cannot escape), and closure of the output mass.

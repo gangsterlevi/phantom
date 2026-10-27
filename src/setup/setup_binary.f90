@@ -17,6 +17,8 @@ module setup
 !   - deltat     : *output interval as fraction of binary period*
 !   - gwinspiral : *set gravitational wave inspiral*
 !   - norbits    : *maximum number of binary orbits*
+!   - itype      : *orbital input type; 5 derives a circular two-body Roche-lobe orbit*
+!   - roche_overflow1 : *percentage overflow, 100*(R1/RL1-1), using the relaxed particle radius*
 !
 ! :Dependencies: centreofmass, dim, eos, extern_gwinspiral, externalforces,
 !   infile_utils, io, kernel, mpidomain, options, part, physcon,
@@ -24,7 +26,7 @@ module setup
 !   setup_params, timestep, units
 !
  use setstar,       only:star_t
- use setorbit,      only:orbit_t
+ use setorbit,      only:orbit_t,iorbit_roche
  use sethier_utils, only:max_hier_levels
  use dim,      only:gr
  use eos,      only:ieos
@@ -51,13 +53,13 @@ subroutine setpart(id,npart,npartoftype,xyzh,massoftype,vxyzu,&
                    polyk,gamma,hfact,time,fileprefix)
  use part,           only:gr,nptmass,xyzmh_ptmass,vxyz_ptmass,&
                           ihacc,ihsoft,eos_vars,rad,nsinkproperties,iJ2,iReff,ispinx,ispinz
- use setorbit,       only:set_defaults_orbit,set_orbit
+ use setorbit,       only:set_defaults_orbit,set_orbit,set_roche_lobe_orbit
  use sethierarchical,only:set_hierarchical,set_hierarchical_default_options,hs,generate_hierarchy_string
  use options,        only:iexternalforce,alphau
  use externalforces, only:iext_corotate,iext_geopot,iext_star,iext_gwinspiral,omega_corotate,mass1,accradius1
  use extern_gwinspiral, only:Nstar_gw
  use io,             only:master,fatal
- use setstar,        only:set_defaults_stars,set_stars,shift_stars
+ use setstar,        only:set_defaults_stars,set_stars,shift_stars,centre_stars_for_orbit
  use eos,            only:X_in,Z_in,use_var_comp
  use setup_params,   only:rhozero,npart_total
  use mpidomain,      only:i_belong
@@ -79,7 +81,7 @@ subroutine setpart(id,npart,npartoftype,xyzh,massoftype,vxyzu,&
  integer :: ierr,nptmass_in,iextern_prev,i
  logical :: add_spin
  real :: xyzmh_ptmass_in(nsinkproperties,max_stars),vxyz_ptmass_in(3,max_stars),angle
- real :: m1,m2,hacc1,hacc2
+ real :: m1,m2,hacc1,hacc2,overflow1
  logical, parameter :: set_oblateness = .false.
 !
 !--general parameters
@@ -155,6 +157,21 @@ subroutine setpart(id,npart,npartoftype,xyzh,massoftype,vxyzu,&
     hacc1 = star(1)%hacc_code
     hacc2 = star(2)%hacc_code
 
+    if (orbit%input_type==iorbit_roche) then
+       call centre_stars_for_orbit(nstar,star,npart,xyzh,vxyzu,xyzmh_ptmass,vxyz_ptmass)
+       m1 = star(1)%m_code
+       m2 = star(2)%m_code
+       overflow1 = orbit%roche_overflow
+       call set_roche_lobe_orbit(orbit,m1,m2,star(1)%r_particles_code,overflow1,ierr)
+       if (ierr /= 0) call fatal('setup_binary','Roche orbit requires positive masses and a live donor radius')
+       if (id==master) then
+          print "(/,a)",' CIRCULAR ROCHE-LOBE ORBIT (star 1 is the donor)'
+          print "(a,es14.6)",'  relaxed particle radius R1 (code units) = ',star(1)%r_particles_code
+          print "(a,es14.6)",'  requested overflow 100*(R1/RL1-1) (%)  = ',overflow1
+          print "(a,es14.6)",'  target Roche-lobe radius RL1           = ',star(1)%r_particles_code/(1.+overflow1/100.)
+       endif
+    endif
+
     if (iextern_prev==iext_corotate) then
        call set_orbit(orbit,m1,m2,hacc1,hacc2,xyzmh_ptmass_in,vxyz_ptmass_in,&
                       nptmass_in,(id==master),ierr,omega_corotate)
@@ -198,9 +215,19 @@ subroutine setpart(id,npart,npartoftype,xyzh,massoftype,vxyzu,&
  endif
 
  alphau = min(0.1,alphau)
- if (.not.infile_exists(fileprefix) .and. nstar == 2) then
-    tmax = norbits * orbit%period
-    dtmax = deltat * orbit%period
+ if (nstar == 2) then
+    ! Roche separation is derived from the newly constructed star, so refresh
+    ! its period-based run times even when a previous .in file exists.
+    if (orbit%input_type==iorbit_roche .or. .not.infile_exists(fileprefix)) then
+       tmax = norbits * orbit%period
+       dtmax = deltat * orbit%period
+       if (id==master .and. orbit%input_type==iorbit_roche) then
+          print "(/,a)",' ROCHE ORBIT SIMULATION TIMES (code units)'
+          print "(a,es14.6)",'  orbital period P = ',orbit%period
+          print "(a,es14.6,a,f10.4,a)",'  tmax             = ',tmax,' (',norbits,' orbits)'
+          print "(a,es14.6,a,f10.4,a)",'  dtmax            = ',dtmax,' (',deltat,' orbits between dumps)'
+       endif
+    endif
  endif
 
 end subroutine setpart
@@ -230,7 +257,7 @@ subroutine write_setupfile(filename)
  elseif (nstar == 2) then
     call write_inopt(corotate,'corotate','set stars in corotation',iunit)
     call write_inopt(gwinspiral,'gwinspiral','set gravitational wave inspiral',iunit)
-    call write_options_orbit(orbit,iunit)
+    call write_options_orbit(orbit,iunit,allow_roche=.true.)
 
     write(iunit,"(/,a)") '# timestepping'
     call write_inopt(norbits,'norbits','maximum number of binary orbits',iunit)
@@ -256,7 +283,8 @@ subroutine read_setupfile(filename,ierr)
  character(len=*), intent(in)  :: filename
  integer,          intent(out) :: ierr
  integer, parameter :: iunit = 21
- integer :: nerr,ierr1
+ integer :: nerr,ierr1,input_type
+ logical :: legacy_roche
  type(inopts), allocatable :: db(:)
  real :: m1,m2
 
@@ -265,18 +293,34 @@ subroutine read_setupfile(filename,ierr)
  call open_db_from_file(db,filename,iunit,ierr)
  call read_options_and_set_units(db,nerr,gr)
  call read_options_stars(star,ieos,relax,write_rho_to_file,db,nerr,nstar)
+ call read_inopt(input_type,'itype',db,errcount=nerr,min=0,max=iorbit_roche,default=0)
+ ! Migrate the previous switch to itype=5 on the normal setup-file rewrite.
+ call read_inopt(legacy_roche,'roche_circular',db,errcount=nerr,default=.false.)
+ if (legacy_roche) then
+    input_type = iorbit_roche
+    print "(a)",' Replacing roche_circular=T with itype=5 in the setup file; review and rerun.'
+    nerr = nerr+1
+ endif
+ if (input_type==iorbit_roche) then
+    if (nstar /= 2) call fatal('setup_binary','itype=5 requires exactly two bodies (nstars=2)')
+    if (star(1)%iprofile <= 0) call fatal('setup_binary','itype=5 requires star 1 to contain gas particles')
+ endif
  if (nstar > 2) then
     call read_hierarchical_setupfile(db,nerr,nstar)
  elseif (nstar == 2) then
     call read_inopt(corotate,'corotate',db,errcount=nerr)
     call read_inopt(gwinspiral,'gwinspiral',db,errcount=nerr,default=.false.)
-    m1 = in_code_units(star(1)%m,ierr,unit_type='mass')
-    m2 = in_code_units(star(2)%m,ierr1,unit_type='mass')
-    if (ierr /= 0 .or. ierr1 /= 0) then
-       print*,' ERROR: error converting masses to code units'
-       nerr = nerr + 1
+    m1 = 1.
+    m2 = 1.
+    if (input_type /= iorbit_roche) then
+       m1 = in_code_units(star(1)%m,ierr,unit_type='mass')
+       m2 = in_code_units(star(2)%m,ierr1,unit_type='mass')
+       if (ierr /= 0 .or. ierr1 /= 0) then
+          print*,' ERROR: error converting masses to code units'
+          nerr = nerr + 1
+       endif
     endif
-    call read_options_orbit(orbit,m1,m2,db,nerr)
+    call read_options_orbit(orbit,m1,m2,db,nerr,input_type=input_type,allow_roche=.true.)
     call read_inopt(norbits,'norbits',db,errcount=nerr)
     call read_inopt(deltat,'deltat',db,errcount=nerr,default=0.1)
  endif

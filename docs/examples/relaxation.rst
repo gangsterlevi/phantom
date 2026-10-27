@@ -81,11 +81,25 @@ temperature supplied to the opacity lookup. The opacity tables themselves
 remain initialized for the global composition. A constant conversion
 (``cv_type=0``) does not generally reproduce EoS 20 temperatures.
 
-``tol_radrelax`` measures the larger of the mass-averaged absolute changes in
-gas and radiation specific energies, scaled to one dynamical time (in code
-specific-energy units). It is not a fractional energy tolerance.
-Convergence is checked every 10 steps, and snapshots are normally written
-every 100 steps. Thus ``rad_relax1_00001`` usually represents step 100.
+``tol_radrelax`` limits the fractional absolute change in combined gas and
+radiation energy per dynamical time. For each particle, the changes in gas
+and radiation specific energies are added before taking the absolute value;
+the mass-weighted sum is divided by the total gas plus radiation energy at
+initialisation and multiplied by ``tdyn/dtcheck``. Thus gas--radiation exchange
+cancels locally, while energy redistribution between particles does not.
+The reference energy is fixed for each invocation, including a resumed run.
+A tolerance of ``1.e-3`` corresponds to 0.1 per cent of that reference energy
+per dynamical time; this replaces the previous tolerance in code
+specific-energy units.
+
+Convergence requires this energy error below ``tol_radrelax``. The ratio
+``Ekin/abs(Epot)`` is monitored using the same global energy calculation as
+hydrodynamic relaxation, but does not restrict radiative convergence;
+``tol_ekin`` applies only to hydrodynamic relaxation. There is no minimum
+elapsed-time requirement. Both diagnostics are printed to the console and
+written to the radiative relaxation ``.ev`` file (columns 3 and 4). Checks occur every 10
+steps, and snapshots are normally written every 100 steps. Thus
+``rad_relax1_00001`` usually represents step 100.
 Existing radiative relaxation snapshots are automatically reused on restart;
 compare changed physics in a fresh run directory to avoid resuming an already
 cooled model.

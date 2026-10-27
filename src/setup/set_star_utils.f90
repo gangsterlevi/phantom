@@ -77,7 +77,8 @@ subroutine read_star_profile(iprofile,ieos,input_profile,gamma,polyk,ui_coef,&
  use eos_piecewise,      only:get_dPdrho_piecewise
  use kernel,             only:radkern
  use part,               only:do_radiation
- use rho_profile,        only:rho_uniform,rho_polytrope,rho_piecewise_polytrope,rho_evrard,func
+ use rho_profile,        only:rho_uniform,rho_polytrope,rho_piecewise_polytrope,rho_evrard,func,calc_mass_enc
+ use eos,                only:get_mean_molecular_weight
  use readwrite_mesa,     only:read_mesa,write_mesa
  use readwrite_kepler,   only:read_kepler_file
  use setsoftenedcore,    only:set_softened_core
@@ -197,6 +198,21 @@ subroutine read_star_profile(iprofile,ieos,input_profile,gamma,polyk,ui_coef,&
     pres = polyk*den**gamma
     print*,' Assuming polyk = ',polyk
  end select
+
+ ! Analytic/density-only companions have no composition table. Supply the
+ ! configured uniform composition so they can share use_var_comp with a
+ ! MESA donor, and construct the mass coordinate used for particle mapping.
+ if (.not.allocated(Xfrac)) then
+    allocate(Xfrac(npts),Yfrac(npts),mu(npts))
+    Xfrac = X_in
+    Yfrac = 1.-X_in-Z_in
+    mu = get_mean_molecular_weight(X_in,Z_in)
+    if (size(mtab) /= npts) then
+       deallocate(mtab)
+       allocate(mtab(npts))
+    endif
+    call calc_mass_enc(npts,r(1:npts),den(1:npts),mtab(1:npts))
+ endif
 
 end subroutine read_star_profile
 

@@ -19,7 +19,7 @@ module relaxstar
 !   - maxits_radrelax  : *maximum number of steps in radiative relaxation*
 !   - relax_radiation  : *relax star with radiation transport after setting composition*
 !   - tol_ekin         : *tolerance on ekin/epot to stop relaxation*
-!   - tol_radrelax     : *tolerance on average absolute change in u+xi per dynamical time*
+!   - tol_radrelax     : *tolerance on fractional absolute change in u+xi per dynamical time*
 !
 ! :Dependencies: apr, checksetup, damping, deriv, dim, dump_utils,
 !   energies, eos, externalforces, fileutils, infile_utils, initial, io,
@@ -28,13 +28,14 @@ module relaxstar
 !
  implicit none
  public :: relax_star,relax_star_radiation,write_options_relax,read_options_relax
+ public :: get_radrelax_energy_change
 
  real,    public  :: tol_ekin = 1.e-7 ! criteria for being converged
  integer, public  :: maxits = 1000
 
  logical, public  :: relax_radiation = .false. ! relax with radiation transport after the hydrodynamic relaxation
  logical, public  :: damp_radrelax = .false.   ! damp velocities during the radiative relaxation
- real,    public  :: tol_radrelax = 1.e-3      ! average absolute change in u+xi per dynamical time
+ real,    public  :: tol_radrelax = 1.e-3      ! fractional absolute change in u+xi per dynamical time
  integer, public  :: maxits_radrelax = 10000
 
  real,    private :: gammaprev,hfactprev,mass1prev
@@ -370,9 +371,10 @@ end subroutine relax_star
 !  relax the star further with radiation transport, using the real
 !  equation of state and the implicit radiation solver. Particles
 !  evolve hydrodynamically (damped) together with u and xi until
-!  the mass-weighted mean absolute change in u+xi per dynamical time is below
-!  tol_radrelax. Must be called after the composition and thermal
-!  energy / radiation energy have been set.
+!  fractional absolute change in u+xi per dynamical time is below
+!  tol_radrelax. Ekin/|Epot| is reported as a diagnostic only. The energy
+!  reference is fixed at the start of this call. Must be called after
+!  composition and gas / radiation energies have been set.
 !
 !  IN:
 !    rstar,mtot - radius and total mass of the star (code units)
@@ -388,7 +390,7 @@ subroutine relax_star_radiation(npart,xyzh,rstar,mtot,npin,ierr,label,write_dump
  use dim,            only:maxvxyzu,do_radiation,gr
  use eos_gasradrec,  only:report_newton_stalls
  use eos,            only:ieos
- use part,           only:vxyzu,rad,iradxi,init_rho_from_h,massoftype,igas,apr_level,aprmassoftype
+ use part,           only:vxyzu,rad,iradxi,init_rho_from_h,massoftype,igas
  use step_lf_global, only:init_step,step
  use damping,        only:damp
  use options,        only:idamp,implicit_radiation
@@ -396,7 +398,7 @@ subroutine relax_star_radiation(npart,xyzh,rstar,mtot,npin,ierr,label,write_dump
  use physcon,        only:pi
  use fileutils,      only:getnextfilename
  use readwrite_dumps, only:write_fulldump
- use apr,             only:use_apr
+ use energies,        only:compute_energies,ekin,epot
  use radiation_utils, only:write_options_radiation
  integer,  intent(in)    :: npin
  integer,  intent(inout) :: npart
@@ -405,8 +407,8 @@ subroutine relax_star_radiation(npart,xyzh,rstar,mtot,npin,ierr,label,write_dump
  integer,  intent(out)   :: ierr
  character(len=*), intent(in), optional :: label
  logical,          intent(in), optional :: write_dumps
- integer :: i,nits,ncheck,iunit,nits_dumped
- real    :: t,dt,dtext,dtnew,tdyn,tlast,dtcheck,err,rmax,du_sum,dxi_sum,duxi_sum,mtot_sum,pmassi
+ integer :: nits,iunit,nits_dumped
+ real    :: t,dt,dtext,dtnew,tdyn,tlast,dtcheck,err,rmax,du_sum,energy_ref,energy_sum,ekin_ratio
  real, allocatable :: u0(:),xi0(:)
  logical :: converged,implicit_prev,write_files,restart
  character(len=20) :: filename,mylabel
@@ -426,8 +428,9 @@ subroutine relax_star_radiation(npart,xyzh,rstar,mtot,npin,ierr,label,write_dump
  if (present(label)) mylabel = label
 
  tdyn = 2.*pi*sqrt(rstar**3/(32.*mtot))
- if (id==master) print "(/,a,es10.3,a,i0)",' RADIATIVE RELAXATION: average |max(du, dxi)|/tdyn tolerance = ',tol_radrelax,&
-                                           ', max steps = ',maxits_radrelax
+ if (id==master) print "(/,a,es10.3,a,i0)", &
+      ' RADIATIVE RELAXATION: fractional |d(u+xi)| per tdyn tolerance = ',tol_radrelax, &
+      ', max steps = ',maxits_radrelax
 
  filename = 'rad_relax'//trim(mylabel)//'_00000'
  call check_for_existing_file(filename,npart,massoftype(igas),xyzh,vxyzu,restart,ierr)
@@ -455,9 +458,9 @@ subroutine relax_star_radiation(npart,xyzh,rstar,mtot,npin,ierr,label,write_dump
  allocate(u0(npart),xi0(npart))
  u0  = vxyzu(4,1:npart)
  xi0 = rad(iradxi,1:npart)
+ call get_radrelax_energy_change(npin,npart,xyzh,vxyzu(4,:),rad(iradxi,:),u0,xi0,du_sum,energy_ref,rmax)
  tlast = t
  converged = .false.
- ncheck = 0
  nits = 0
  nits_dumped = 0
  if (write_files) then
@@ -466,8 +469,8 @@ subroutine relax_star_radiation(npart,xyzh,rstar,mtot,npin,ierr,label,write_dump
        open(newunit=iunit,file='rad_relax'//trim(mylabel)//'.ev',status='unknown',position='append')
     else
        open(newunit=iunit,file='rad_relax'//trim(mylabel)//'.ev',status='replace')
-       write(iunit,"(a)") '# nits,t/tdyn,mass-averaged |d(max(u, xi))| per tdyn'
     endif
+    write(iunit,"(a)") '# nits,t/tdyn,fractional absolute d(u+xi) per tdyn,Ekin/|Epot|'
  endif
  do while (.not.converged .and. nits < maxits_radrelax)
     nits = nits + 1
@@ -476,37 +479,24 @@ subroutine relax_star_radiation(npart,xyzh,rstar,mtot,npin,ierr,label,write_dump
     dt = dtnew
 
     if (mod(nits,nstep_check)==0) then
-       du_sum = 0.
-       dxi_sum = 0.
-       duxi_sum = 0.
-       mtot_sum = 0.
-       rmax = 0.
-       do i = npin+1,npart
-          if (use_apr) then
-             pmassi = aprmassoftype(igas,apr_level(i))
-          else
-             pmassi = massoftype(igas)
-          endif
-          du_sum = du_sum + pmassi*abs(vxyzu(4,i)-u0(i))
-          dxi_sum = dxi_sum + pmassi*abs(rad(iradxi,i)-xi0(i))
-          duxi_sum = duxi_sum + pmassi*((vxyzu(4,i)-u0(i)) + (rad(iradxi,i)-xi0(i)))
-          mtot_sum = mtot_sum + pmassi
-          rmax = max(rmax,sqrt(dot_product(xyzh(1:3,i),xyzh(1:3,i))))
-       enddo
+       call get_radrelax_energy_change(npin,npart,xyzh,vxyzu(4,:),rad(iradxi,:),u0,xi0,du_sum,energy_sum,rmax)
        dtcheck = t - tlast
-       err = max(du_sum,dxi_sum)/mtot_sum*tdyn/dtcheck
+       err = huge(0.)
+       if (dtcheck > tiny(dtcheck) .and. energy_ref > tiny(energy_ref)) err = (du_sum/energy_ref)*tdyn/dtcheck
+       call compute_energies(t)
+       ekin_ratio = huge(0.)
+       if (abs(epot) > tiny(epot)) ekin_ratio = ekin/abs(epot)
        u0  = vxyzu(4,1:npart)
        xi0 = rad(iradxi,1:npart)
        tlast = t
        converged = (err < tol_radrelax)
-       ncheck = ncheck + 1
-       if (write_files) write(iunit,*) nits,t/tdyn,err
+       if (write_files) write(iunit,*) nits,t/tdyn,err,ekin_ratio
        if (id==master) then
           write(*,'(a,i0,a,i0,a,1pg11.3,a,1pg11.3,a,1pg11.3,a,1pg11.3,a,1pg11.3)') &
              ' Relaxing star with radiation: Iter ',nits,'/',maxits_radrelax, &
              ', R*:',rmax,', t/tdyn:',t/tdyn, &
-             ', average absolute change in u or xi per tdyn:',err, &
-             ', radiation (du+dxi)/tdyn:',abs(duxi_sum)/mtot_sum*tdyn/dtcheck
+             ', fractional |d(u+xi)| per tdyn:',err, &
+             ', Ekin/|Epot|:',ekin_ratio
        endif
        call report_newton_stalls(6,int(npart,kind=8),ieos)
     endif
@@ -539,6 +529,37 @@ subroutine relax_star_radiation(npart,xyzh,rstar,mtot,npin,ierr,label,write_dump
  deallocate(u0,xi0)
 
 end subroutine relax_star_radiation
+
+!-----------------------------------------------------------------------
+! Sum absolute changes in the combined gas and radiation energy per
+! particle, so exchange can cancel locally but redistribution cannot cancel
+! between particles. Use the same mass weights for the reference energy.
+!-----------------------------------------------------------------------
+subroutine get_radrelax_energy_change(i1,npart,xyzh,u,xi,u0,xi0,du_sum,energy_sum,rmax)
+ use part, only:massoftype,igas,apr_level,aprmassoftype,isdead_or_accreted
+ use apr,  only:use_apr
+ integer, intent(in) :: i1,npart
+ real, intent(in) :: xyzh(:,:),u(:),xi(:),u0(:),xi0(:)
+ real, intent(out) :: du_sum,energy_sum,rmax
+ real :: pmassi
+ integer :: i
+
+ du_sum = 0.
+ energy_sum = 0.
+ rmax = 0.
+ do i=i1+1,npart
+    if (isdead_or_accreted(xyzh(4,i))) cycle
+    if (use_apr) then
+       pmassi = aprmassoftype(igas,apr_level(i))
+    else
+       pmassi = massoftype(igas)
+    endif
+    du_sum = du_sum + pmassi*abs((u(i)-u0(i)) + (xi(i)-xi0(i)))
+    energy_sum = energy_sum + pmassi*(u(i)+xi(i))
+    rmax = max(rmax,sqrt(dot_product(xyzh(1:3,i),xyzh(1:3,i))))
+ enddo
+
+end subroutine get_radrelax_energy_change
 
 !----------------------------------------------------------------
 !+
@@ -849,7 +870,7 @@ subroutine write_options_relax(iunit,relax,ieos)
     call write_inopt(relax_radiation,'relax_radiation','relax with radiation transport after setting composition',iunit)
     call write_inopt(damp_radrelax,'damp_radrelax','damp velocities during radiative relaxation',iunit)
    call write_inopt(tol_radrelax,'tol_radrelax',&
-                'tolerance on mass-weighted mean absolute change in u+xi per dynamical time (code specific energy)',iunit)
+                'tolerance on fractional absolute change in u+xi per dynamical time',iunit)
     call write_inopt(maxits_radrelax,'maxits_radrelax','maximum number of steps in radiative relaxation',iunit)
     write(iunit,"(/,a)") '# radiation options for relaxation (override .in values during setup)'
     call write_inopt(exchange_radiation_energy,'gas-rad_exchange','exchange energy between gas and radiation',iunit)

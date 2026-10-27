@@ -17,7 +17,7 @@ module testradiation
 !
 ! :Runtime parameters: None
 !
-! :Dependencies: boundary, deriv, dim, eos, io, kernel, mpidomain,
+! :Dependencies: boundary, deriv, dim, eos, implicit, io, kernel, mpidomain,
 !   mpiutils, neighkdtree, options, part, physcon, radiation_implicit,
 !   radiation_utils, readwrite_dumps, step_lf_global, testutils, timestep,
 !   unifdis, units
@@ -50,6 +50,7 @@ subroutine test_radiation(ntests,npass)
  endif
  if (id==master) write(*,"(/,a,/)") '--> TESTING RADIATION MODULE'
 
+ call test_implicit_workspace_growth(ntests,npass)
  call set_units(dist=au,mass=solarm,G=1.d0)
  call test_exchange_terms(ntests,npass,use_implicit=.false.)
  if (.not.mpi) call test_exchange_terms(ntests,npass,use_implicit=.true.)
@@ -73,6 +74,33 @@ subroutine test_radiation(ntests,npass)
  if (id==master) write(*,"(/,a)") '<-- RADIATION TEST COMPLETE'
 
 end subroutine test_radiation
+
+! Setup adds particles as each star is constructed. The implicit workspace
+! must grow between solves and also return a defined status on reuse.
+subroutine test_implicit_workspace_growth(ntests,npass)
+ use implicit, only:allocate_memory_implicit,ivar,vari,varinew,mask,ijvar,varij,varij2,icompactmax
+ integer, intent(inout) :: ntests,npass
+ integer :: ierr,nold,nnew,nerr(6)
+
+ call allocate_memory_implicit(8,2.,1.2,ierr)
+ nold = size(ivar,2)
+ nnew = nold+8
+ call allocate_memory_implicit(nnew,2.,1.2,ierr)
+ call checkval(ierr,0,0,nerr(1),'implicit workspace grows successfully')
+ call checkval(size(ivar,2),nnew,0,nerr(2),'implicit particle index capacity grows')
+ call checkval(size(vari,2),nnew,0,nerr(3),'implicit per-particle state capacity grows')
+ call checkval(size(varinew,2),nnew,0,nerr(4),'implicit new state capacity grows')
+ call checkval(size(mask),nnew,0,nerr(5),'implicit particle mask capacity grows')
+ call checkval(min(size(ijvar),size(varij,2),size(varij2,2)),icompactmax,0,nerr(6), &
+               'implicit neighbour storage grows consistently')
+ call update_test_scores(ntests,nerr,npass)
+ ierr = -1
+ call allocate_memory_implicit(4,2.,1.2,ierr)
+ call checkval(ierr,0,0,nerr(1),'implicit workspace reuse returns success')
+ call checkval(size(ivar,2),nnew,0,nerr(2),'implicit workspace retains sufficient capacity')
+ call update_test_scores(ntests,nerr(1:2),npass)
+
+end subroutine test_implicit_workspace_growth
 
 !----------------------------------------------------
 !+

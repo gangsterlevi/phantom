@@ -37,9 +37,15 @@ subroutine allocate_memory_implicit(npart,radkern,hfact,ierr)
  real,    intent(in)  :: radkern,hfact
  integer, intent(out) :: ierr
 
+ ierr = 0
  if (done_allocation) then
-    return
- else
+    if (npart <= size(ivar,2)) return
+    ! A second resolved star increases npart during setup. The neighbour
+    ! workspace must grow before the solver writes the new particle rows.
+    deallocate(ivar,ijvar,vari,varij,varij2,varinew,mask)
+    done_allocation = .false.
+ endif
+ if (.not.done_allocation) then
     nneigh_average = int(4./3.*pi*(radkern*hfact)**3) + 1
     icompactmax = int(1.2*10.*nneigh_average*npart)
     allocate(ivar(3,npart),stat=ierr)

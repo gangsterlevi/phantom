@@ -48,6 +48,7 @@ module setstar
     integer :: np
     character(len=20) :: m,r,rcore,mcore,lcore,hsoft,hacc
     real :: r_code,m_code,rcore_code,mcore_code,hsoft_code,lcore_code,hacc_code
+    real :: r_particles_code ! outermost live particle centre after relaxation, before orbital placement
     real :: ui_coef
     real :: polyk
     real :: initialtemp
@@ -59,7 +60,7 @@ module setstar
  public :: star_t
  public :: set_star,set_stars
  public :: set_defaults_star,set_defaults_stars
- public :: shift_star,shift_stars
+ public :: shift_star,shift_stars,centre_stars_for_orbit
  public :: write_options_star,write_options_stars
  public :: read_options_star,read_options_stars
  public :: set_stars_interactive
@@ -109,6 +110,7 @@ subroutine set_defaults_star(star)
  star%dens_profile   = 'density.profile'
  star%compfile       = 'kepler.comp'
  star%label          = ''
+ star%r_particles_code = 0.
 
 end subroutine set_defaults_star
 
@@ -529,6 +531,68 @@ subroutine set_stars(id,master,nstars,star,xyzh,vxyzu,eos_vars,rad,&
 end subroutine set_stars
 
 !-----------------------------------------------------------------------
+! Remove the bulk motion of each isolated star, including its sink core,
+! before Roche orbital placement. Tags are valid until shift_stars converts
+! them back to gas. Other stars and dead particles must not enter the sums.
+!-----------------------------------------------------------------------
+subroutine centre_stars_for_orbit(nstar,star,npart,xyzh,vxyzu,xyzmh_ptmass,vxyz_ptmass)
+ use part, only:massoftype,igas,isdead_or_accreted,get_particle_type,aprmassoftype,apr_level
+ use dim, only:use_apr
+ use io, only:id,master
+ use mpiutils, only:reduceall_mpi
+ integer, intent(in) :: nstar,npart
+ type(star_t), intent(inout) :: star(:)
+ real, intent(inout) :: xyzh(:,:),vxyzu(:,:),xyzmh_ptmass(:,:),vxyz_ptmass(:,:)
+ integer :: j,i,mytype,ncores,icore
+ real :: sums(7),pmass
+
+ ncores = 0
+ do j=1,nstar
+    if (star(j)%iprofile <= 0) cycle
+    icore = 0
+    if (star(j)%isinkcore) then
+       ncores = ncores+1
+       icore = ncores
+    endif
+    sums = 0.
+    do i=1,npart
+       call get_particle_type(i,mytype)
+       if (mytype /= j+istar_offset .or. isdead_or_accreted(xyzh(4,i))) cycle
+       pmass = massoftype(igas)
+       if (use_apr) pmass = aprmassoftype(igas,apr_level(i))
+       sums(1:3) = sums(1:3)+pmass*xyzh(1:3,i)
+       sums(4:6) = sums(4:6)+pmass*vxyzu(1:3,i)
+       sums(7) = sums(7)+pmass
+    enddo
+    if (icore > 0 .and. id==master) then
+       pmass = xyzmh_ptmass(4,icore)
+       sums(1:3) = sums(1:3)+pmass*xyzmh_ptmass(1:3,icore)
+       sums(4:6) = sums(4:6)+pmass*vxyz_ptmass(:,icore)
+       sums(7) = sums(7)+pmass
+    endif
+    sums = reduceall_mpi('+',sums)
+    ! A resolved companion's particle count is rounded to the common gas
+    ! particle mass; use its represented mass, including the core, in orbit.
+    star(j)%m_code = sums(7)
+    if (sums(7) > 0.) sums(1:6) = sums(1:6)/sums(7)
+    star(j)%r_particles_code = 0.
+    do i=1,npart
+       call get_particle_type(i,mytype)
+       if (mytype /= j+istar_offset .or. isdead_or_accreted(xyzh(4,i))) cycle
+       xyzh(1:3,i) = xyzh(1:3,i)-sums(1:3)
+       vxyzu(1:3,i) = vxyzu(1:3,i)-sums(4:6)
+       star(j)%r_particles_code = max(star(j)%r_particles_code,sqrt(dot_product(xyzh(1:3,i),xyzh(1:3,i))))
+    enddo
+    star(j)%r_particles_code = reduceall_mpi('max',star(j)%r_particles_code)
+    if (icore > 0) then
+       xyzmh_ptmass(1:3,icore) = xyzmh_ptmass(1:3,icore)-sums(1:3)
+       vxyz_ptmass(:,icore) = vxyz_ptmass(:,icore)-sums(4:6)
+    endif
+ enddo
+
+end subroutine centre_stars_for_orbit
+
+!-----------------------------------------------------------------------
 !+
 !  shift star to the desired position and velocity
 !+
@@ -575,8 +639,8 @@ subroutine shift_star(npart,npartoftype,xyz,vxyz,x0,v0,itype,corotate)
     xyz(1:3,i) = xyz(1:3,i) + x0(:)
     vxyz(1:3,i) = vxyz(1:3,i) + v0(:)
     if (add_spin) then
-       call cross_product3D(xyz(1:3,i),omega,vspin)
-       vxyz(1:3,i) = vxyz(1:3,i) + (vspin(1:3)-v0)
+       call cross_product3D(omega,xyz(1:3,i)-x0,vspin)
+       vxyz(1:3,i) = vxyz(1:3,i) + vspin
     endif
  enddo over_parts
 
@@ -592,6 +656,7 @@ subroutine shift_stars(nstar,star,x0,v0,&
                        xyzh,vxyzu,xyzmh_ptmass,vxyz_ptmass,&
                        npart,npartoftype,nptmass,corotate)
  use part, only:ihacc,ihsoft
+ use vectorutils, only:cross_product3D
  integer,      intent(in)    :: nstar,npart
  type(star_t), intent(in)    :: star(nstar)
  real,         intent(in)    :: x0(:,:),v0(:,:)
@@ -601,7 +666,7 @@ subroutine shift_stars(nstar,star,x0,v0,&
  logical,      intent(in), optional :: corotate
  integer :: i,ierr,ncores,nptmass_in
  logical :: do_corotate
- real :: rstar,mstar,rcore,mcore,hsoft,lcore,hacc
+ real :: rstar,mstar,rcore,mcore,hsoft,lcore,hacc,omega(3),vspin(3)
 
  do_corotate = .false.
  if (present(corotate)) do_corotate = corotate
@@ -615,8 +680,14 @@ subroutine shift_stars(nstar,star,x0,v0,&
        if (star(i)%isinkcore .and. ncores < nptmass_in) then
           ncores = ncores + 1
           print "(a,i0,a,i0)",' Shifting core of star ',i,' which is sink particle #',ncores
-          xyzmh_ptmass(1:3,ncores) = x0(1:3,i)
-          vxyz_ptmass(1:3,ncores) = vxyz_ptmass(1:3,ncores) + v0(1:3,i)
+          vspin = 0.
+          if (do_corotate) then
+             call cross_product3D(x0(1:3,i),v0(1:3,i),omega)
+             omega = omega/dot_product(x0(1:3,i),x0(1:3,i))
+             call cross_product3D(omega,xyzmh_ptmass(1:3,ncores),vspin)
+          endif
+          xyzmh_ptmass(1:3,ncores) = xyzmh_ptmass(1:3,ncores) + x0(1:3,i)
+          vxyz_ptmass(1:3,ncores) = vxyz_ptmass(1:3,ncores) + v0(1:3,i) + vspin
        endif
     else
        call get_star_properties_in_code_units(star(i),rstar,mstar,rcore,mcore,hsoft,lcore,hacc,ierr)
