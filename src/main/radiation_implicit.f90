@@ -180,7 +180,7 @@ subroutine do_radiation_onestep(dt,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,faile
  real                 :: maxerrE2last,maxerrU2last,maxerrE2last2,maxerrU2last2,omega,maxerrE2prev2,maxerrU2prev2
  real(kind=4)         :: tlast,tcpulast,t1,tcpu1
  character(len=100)   :: warningstr
- logical              :: converged
+ logical              :: converged,stop_iterations
  real, parameter      :: limitcycletol = 1.e-3
  real, parameter      :: bignumber = 1.e29
 
@@ -211,7 +211,8 @@ subroutine do_radiation_onestep(dt,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,faile
  !$omp shared(xyzh,vxyzu,ivar,ijvar,varinew,radprop,rad,vari,varij,varij2,origEU,EU0,mask,rho) &
  !$omp shared(pdvvisc,dvdx,nucleation,dust_temp,eos_vars,drad,fxyzu,implicit_radiation_store_drad) &
  !$omp shared(exchange_radiation_energy) &
- !$omp shared(converged,maxerrE2,maxerrU2,maxerrE2last,maxerrU2last,itsmax_rad,moresweep,tol_rad,iverbose,ierr) &
+ !$omp shared(converged,stop_iterations,maxerrE2,maxerrU2,maxerrE2last,maxerrU2last,itsmax_rad) &
+ !$omp shared(moresweep,tol_rad,iverbose,ierr) &
  !$omp shared(maxerrE2last2,maxerrU2last2,maxerrE2prev2,maxerrU2prev2,omega,its)
  call fill_arrays(ncompact,ncompactlocal,npart,icompactmax,dt,&
                   xyzh,vxyzu,ivar,ijvar,rad,vari,varij,varij2,EU0)
@@ -227,10 +228,11 @@ subroutine do_radiation_onestep(dt,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,faile
  maxerrU2last2 = bignumber
  mask = .true.
  converged = .false.
+ stop_iterations = .false.
  its = 0
  !$omp end single
 
- iterations: do while (.not. converged)
+ iterations: do while (.not.stop_iterations)
 
     !$omp single
     its = its + 1
@@ -255,8 +257,9 @@ subroutine do_radiation_onestep(dt,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,faile
     !$omp end single
 
     !$omp single
-    maxerrE2prev2 = 0.
-    maxerrU2prev2 = 0.
+    ! A component already below tolerance must not trigger cycle damping.
+    maxerrE2prev2 = bignumber
+    maxerrU2prev2 = bignumber
     if (maxerrE2 > tol_rad) maxerrE2prev2 = abs(maxerrE2-maxerrE2last2)/maxerrE2
     if (maxerrU2 > tol_rad) maxerrU2prev2 = abs(maxerrU2-maxerrU2last2)/maxerrU2
     if (iverbose >= 2) then
@@ -270,9 +273,10 @@ subroutine do_radiation_onestep(dt,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,faile
 
     ! limit cycle detector
     if ((maxerrE2prev2 < limitcycletol) .or. (maxerrU2prev2 < limitcycletol)) omega = 0.5*omega
+    ! All threads must decide to stop in the same synchronized region.
+    ! Reading its after this barrier races with the next iteration's increment.
+    stop_iterations = converged .or. its >= itsmax_rad
     !$omp end single
-
-    if (its >= itsmax_rad) exit iterations
 
  enddo iterations
 

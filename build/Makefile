@@ -50,7 +50,7 @@ endif
 ifndef EDITOR
     EDITOR= emacs
 endif
-ifndef OPENMP
+ifndef
     OPENMP= yes
 endif
 ifndef SPLASH_DIR
