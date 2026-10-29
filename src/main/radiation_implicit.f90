@@ -176,11 +176,12 @@ subroutine do_radiation_onestep(dt,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,faile
  logical, intent(out)   :: failed,moresweep
  integer, intent(out)   :: nit,ierr
  real,    intent(out)   :: maxerrE2,maxerrU2,EU0(6,npart)
- integer              :: its
+ integer              :: its,nslow(npart)
  real                 :: maxerrE2last,maxerrU2last,maxerrE2last2,maxerrU2last2,omega,maxerrE2prev2,maxerrU2prev2
+ real                 :: dUlast(npart)
  real(kind=4)         :: tlast,tcpulast,t1,tcpu1
  character(len=100)   :: warningstr
- logical              :: converged,stop_iterations
+ logical              :: converged,stop_iterations,damp_oscillations
  real, parameter      :: limitcycletol = 1.e-3
  real, parameter      :: bignumber = 1.e29
 
@@ -213,7 +214,7 @@ subroutine do_radiation_onestep(dt,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,faile
  !$omp shared(exchange_radiation_energy) &
  !$omp shared(converged,stop_iterations,maxerrE2,maxerrU2,maxerrE2last,maxerrU2last,itsmax_rad) &
  !$omp shared(moresweep,tol_rad,iverbose,ierr) &
- !$omp shared(maxerrE2last2,maxerrU2last2,maxerrE2prev2,maxerrU2prev2,omega,its)
+ !$omp shared(maxerrE2last2,maxerrU2last2,maxerrE2prev2,maxerrU2prev2,omega,its,dUlast,nslow,damp_oscillations)
  call fill_arrays(ncompact,ncompactlocal,npart,icompactmax,dt,&
                   xyzh,vxyzu,ivar,ijvar,rad,vari,varij,varij2,EU0)
 
@@ -226,6 +227,8 @@ subroutine do_radiation_onestep(dt,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,faile
  maxerrU2last = bignumber
  maxerrE2last2 = bignumber
  maxerrU2last2 = bignumber
+ dUlast = 0.
+ nslow = 0
  mask = .true.
  converged = .false.
  stop_iterations = .false.
@@ -250,7 +253,8 @@ subroutine do_radiation_onestep(dt,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,faile
     call update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
                                      radprop,rad,origEU,varinew,EU0,&
                                      pdvvisc,dvdx,nucleation,dust_temp,eos_vars,drad,fxyzu,&
-                                     mask,implicit_radiation_store_drad,moresweep,maxerrE2,maxerrU2,omega)
+                                     mask,implicit_radiation_store_drad,moresweep,maxerrE2,maxerrU2,omega,&
+                                     dUlast,nslow,damp_oscillations)
 
     !$omp single
     call do_timing('radupdate',t1,tcpu1)
@@ -271,8 +275,12 @@ subroutine do_radiation_onestep(dt,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,faile
     maxerrU2last = maxerrU2
     maxerrE2last = maxerrE2
 
-    ! limit cycle detector
-    if ((maxerrE2prev2 < limitcycletol) .or. (maxerrU2prev2 < limitcycletol)) omega = 0.5*omega
+    ! Damp persistent slow oscillations as well as settled limit cycles.
+    if (damp_oscillations .or. maxerrE2prev2 < limitcycletol .or. maxerrU2prev2 < limitcycletol) then
+       omega = 0.5*omega
+       dUlast = 0.
+       nslow = 0
+    endif
     ! All threads must decide to stop in the same synchronized region.
     ! Reading its after this barrier races with the next iteration's increment.
     stop_iterations = converged .or. its >= itsmax_rad
@@ -741,7 +749,7 @@ end subroutine calc_diffusion_term
 subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
                                        radprop,rad,origEU,varinew,EU0,&
                                        pdvvisc,dvdx,nucleation,dust_temp,eos_vars,drad,fxyzu, &
-                                       mask,store_drad,moresweep,maxerrE2,maxerrU2,omega)
+                                       mask,store_drad,moresweep,maxerrE2,maxerrU2,omega,dUlast,nslow,damp_oscillations)
  use io,      only:fatal,error
  use units,   only:get_radconst_code,get_c_code,unit_density
  use physcon, only:mass_proton_cgs
@@ -754,9 +762,11 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
  real,         intent(in)    :: eos_vars(:,:)
  real,         intent(inout) :: drad(:,:),fxyzu(:,:),nucleation(:,:),dust_temp(:)
  real,         intent(inout) :: radprop(:,:),EU0(6,npart),omega
+ real,         intent(inout) :: dUlast(npart)
+ integer,      intent(inout) :: nslow(npart)
  real,         intent(out)   :: maxerrE2,maxerrU2
  logical,      intent(in)    :: store_drad
- logical,      intent(out)   :: moresweep
+ logical,      intent(out)   :: moresweep,damp_oscillations
  logical,      intent(inout) :: mask(npart)
  integer             :: i,n,ieqtype,ierr
  logical             :: moresweep2,skip_quartic
@@ -768,7 +778,8 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
  real                :: pres_numerator,pres_denominator,mui,U1i,E1i,Tgas,dUcomb,dEcomb
  real                :: residualE,residualU,maxerrU2old,Tgas4,Trad4,ck,ack
  real                :: Ei,Ui,cvi,opacityi,eddi
- real                :: maxerrE2i,maxerrU2i
+ real                :: maxerrE2i,maxerrU2i,dUi
+ real, parameter     :: max_contraction = 0.94
 
  a_code = get_radconst_code()
  c_code = get_c_code()
@@ -776,6 +787,7 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
  !$omp single
  maxerrE2 = 0.
  maxerrU2 = 0.
+ damp_oscillations = .false.
  !$omp end single
 
  !$omp do schedule(runtime)&
@@ -785,8 +797,8 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
  !$omp private(cooling_line,photoelectric,h2form,dust_heating,dust_term,betaval,chival,gammaval,betaval_d,tfour) &
  !$omp private(e_planetesimali,u4term,u1term,u0term,pcoleni,pres_numerator,pres_denominator,moresweep2,mui,ierr) &
  !$omp private(residualE,residualU,maxerrU2old,gas_temp,ieqtype,unit_density,Tgas4,Trad4,ck,ack) &
- !$omp private(maxerrE2i,maxerrU2i) &
- !$omp reduction(max:maxerrE2,maxerrU2)
+ !$omp private(maxerrE2i,maxerrU2i,dUi) &
+ !$omp reduction(max:maxerrE2,maxerrU2) reduction(.or.:damp_oscillations)
  main_loop: do n = 1,ncompactlocal
     i = ivar(3,n)
 
@@ -1023,6 +1035,15 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
           residualU = origEU(2,i)+(dUcomb)*dti - U1i
        endif
        maxerrU2 = max(maxerrU2, maxerrU2i)
+       ! Require three slow sign reversals of an unconverged gas update.
+       dUi = (U1i-Ui)/U1i
+       if (abs(dUi) > tol_rad .and. dUi*dUlast(i) < 0. .and. abs(dUi) >= max_contraction*abs(dUlast(i))) then
+          nslow(i) = nslow(i) + 1
+       else
+          nslow(i) = 0
+       endif
+       damp_oscillations = damp_oscillations .or. nslow(i) >= 3
+       dUlast(i) = dUi
        !
        ! Record convergence of individual particles
        !
