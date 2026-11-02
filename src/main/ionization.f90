@@ -26,11 +26,11 @@ module ionization_mod
  real, parameter, private                 :: sigm_edge = 1.43713233658279d0, &
                                              dlog=1.e-4
  real, private :: tanh_edge
- integer, parameter, private :: qp = selected_real_kind(33,4931)
+ integer, parameter, public :: qp = selected_real_kind(33,4931)
 
  public:: cvmol
 private::rapid_tanh,rapid_dtanh,rapid_tanh_qp,rapid_dtanh_qp
-private::arec1,brec1,rapid_sigm,get_cveff,imurec1
+private::arec1,brec1,rapid_sigm,get_cveff,imurec1,get_xion_qp,rapid_sigm_qp,get_cveff_qp
 
 contains
 
@@ -286,15 +286,28 @@ subroutine get_xion_quad(logd,T,Y,xion,dxion)
  real,    intent(in)            :: logd,T,Y
  real,    intent(out)           :: xion(1:4)
  real,    intent(out), optional :: dxion(1:4)
- real(qp) :: logd_q,T_q,Y_q,logQ,logT,Yfac
- real(qp) :: Ttra(1:4),width(1:4),arg(1:4),xion_q(1:4),dxion_q(1:4)
+ real(qp) :: xion_q(4),dxion_q(4)
+
+ if (present(dxion)) then
+    call get_xion_qp(real(logd,qp),real(T,qp),real(Y,qp),xion_q,dxion_q)
+    dxion = real(dxion_q,kind(dxion))
+ else
+    call get_xion_qp(real(logd,qp),real(T,qp),real(Y,qp),xion_q)
+ endif
+ xion = real(xion_q,kind(xion))
+
+end subroutine get_xion_quad
+
+! Keep inputs and outputs in quad precision for the bracketed EOS fallback.
+subroutine get_xion_qp(logd_q,T_q,Y_q,xion_q,dxion_q)
+ real(qp), intent(in) :: logd_q,T_q,Y_q
+ real(qp), intent(out) :: xion_q(4)
+ real(qp), intent(out), optional :: dxion_q(4)
+ real(qp) :: logQ,logT,Yfac,Ttra(4),width(4),arg(4)
  real(qp) :: arec_q(2:4),brec_q(2:4),crec_q(1:4),drec_q(1:4),logeion_q(1:4)
  real(qp) :: arec1_q,brec1_q,ln10_q
  integer :: i
 
- logd_q = real(logd,qp)
- T_q = real(T,qp)
- Y_q = real(Y,qp)
  ln10_q = log(10._qp)
  logT = log10(T_q)
  logQ = max(-14._qp,logd_q)-2._qp*logT+12._qp
@@ -304,8 +317,13 @@ subroutine get_xion_quad(logd,T,Y,xion,dxion)
  crec_q = real(crec,qp)
  drec_q = real(drec,qp)
  logeion_q = real(logeion,qp)
- arec1_q = real(arec1(logd),qp)
- brec1_q = real(brec1(logd),qp)
+ if (logd_q < real(edge,qp)) then
+    arec1_q = real(arec1c(1),qp)
+    brec1_q = real(brec1c(1),qp)
+ else
+    arec1_q = real(arec1c(2),qp)
+    brec1_q = real(brec1c(2),qp)
+ endif
  Ttra(1) = arec1_q*logeion_q(1)+brec1_q*logQ
  Ttra(2:4) = Yfac*arec_q*logeion_q(2:4)+brec_q*logQ
  width(1:4) = Ttra(1:4)*crec_q*(1._qp+drec_q*logQ)
@@ -313,9 +331,7 @@ subroutine get_xion_quad(logd,T,Y,xion,dxion)
  do i=1,4
     xion_q(i) = 0.5_qp*(rapid_tanh_qp(arg(i))+1._qp)
  enddo
- xion = real(xion_q,kind(xion))
-
- if (present(dxion)) then
+ if (present(dxion_q)) then
     dxion_q(1) = (width(1)*(1._qp+2._qp*brec1_q) &
                  +2._qp*crec_q(1)*(logT-Ttra(1)) &
                   *(brec1_q*(1._qp+drec_q(1)*logQ)+drec_q(1)*Ttra(1))) &
@@ -324,9 +340,8 @@ subroutine get_xion_quad(logd,T,Y,xion,dxion)
                    +2._qp*crec_q(2:4)*(logT-Ttra(2:4)) &
                     *(brec_q*(1._qp+drec_q(2:4)*logQ)+drec_q(2:4)*Ttra(2:4))) &
                    /(2._qp*T_q*ln10_q*width(2:4)**2)*rapid_dtanh_qp(arg(2:4))
-    dxion = real(dxion_q,kind(dxion))
  endif
-end subroutine get_xion_quad
+end subroutine get_xion_qp
 
 elemental real(qp) function rapid_tanh_qp(x)
  real(qp), intent(in) :: x
@@ -354,6 +369,71 @@ elemental real(qp) function rapid_dtanh_qp(x)
     rapid_dtanh_qp = a/(15._qp*b*b)
  endif
 end function rapid_dtanh_qp
+
+! Use the same stored fit coefficients as the default-real path.
+elemental real(qp) function rapid_sigm_qp(x) result(sigm)
+ real(qp), intent(in) :: x
+ real(qp) :: x2,a,b
+
+ if (abs(x) >= real(sigm_edge,qp)) then
+    sigm = sign(1._qp,x)
+ else
+    x2 = x*x
+    a = real(1.01892853,qp)+(real(0.61598944,qp)+real(0.12291505,qp)*x2)*x2
+    b = 1._qp+(real(0.481799,qp)+real(0.480846,qp)*x2)*x2
+    sigm = x*a/b
+ endif
+
+end function rapid_sigm_qp
+
+function get_cveff_qp(lnT,xi,X,Y) result(cveff)
+ real(qp), intent(in) :: lnT,xi(4),X,Y
+ real(qp) :: cveff,Xmol,cvmol_q
+
+ Xmol = (1._qp-xi(1))*X
+ cvmol_q = 0.5_qp*(rapid_sigm_qp((lnT-real(Trot,qp))/real(sigrot,qp)) &
+                    +rapid_sigm_qp((lnT-real(Tvib,qp))/real(sigvib,qp))+5._qp)
+ ! Algebraically the same molecular/monatomic split as get_cveff, without
+ ! dividing by the monatomic mass fraction (which can vanish for pure H2).
+ cveff = 0.5_qp*cvmol_q*Xmol &
+          +1.5_qp*(0.5_qp*(1._qp+2._qp*xi(2))*xi(1)*X &
+                   +0.25_qp*(xi(3)+xi(4)-1._qp)*Y+0.5_qp*(1._qp-Xmol))
+
+end function get_cveff_qp
+
+!-----------------------------------------------------------------------
+!+
+!  EOS terms for the fallback: no rounding to default real before forming
+!  the energy/pressure residual. Derivatives only guide safeguarded steps;
+!  the temperature bracket independently bounds the solution error.
+!+
+!-----------------------------------------------------------------------
+subroutine get_erec_cveff_qp(logd,T,X,Y,erec,cveff,imu,derecdT,dcveffdlnT,dimurecdlnT)
+ real(qp), intent(in) :: logd,T,X,Y
+ real(qp), intent(out) :: erec,cveff,imu
+ real(qp), intent(out), optional :: derecdT,dcveffdlnT,dimurecdlnT
+ real(qp) :: e(4),xi(4),zi(4),xi_plus(4),xi_minus(4),lnT,delta
+
+ e = real(eion,qp)*[0.5_qp*X,X,0.25_qp*Y,0.25_qp*Y]
+ if (present(derecdT).or.present(dimurecdlnT)) then
+    call get_xion_qp(logd,T,Y,xi,zi)
+ else
+    call get_xion_qp(logd,T,Y,xi)
+ endif
+ erec = sum(e*xi)
+ lnT = log(T)
+ cveff = get_cveff_qp(lnT,xi,X,Y)
+ imu = (0.5_qp*xi(1)+xi(2))*X+0.25_qp*(xi(3)+xi(4)-1._qp)*Y+0.5_qp
+ if (present(derecdT)) derecdT = sum(e*zi)
+ if (present(dimurecdlnT)) dimurecdlnT = T*((0.5_qp*zi(1)+zi(2))*X+0.25_qp*(zi(3)+zi(4))*Y)
+ if (present(dcveffdlnT)) then
+    delta = real(dlog,qp)
+    call get_xion_qp(logd,T*exp(delta),Y,xi_plus)
+    call get_xion_qp(logd,T*exp(-delta),Y,xi_minus)
+    dcveffdlnT = (get_cveff_qp(lnT+delta,xi_plus,X,Y)-get_cveff_qp(lnT-delta,xi_minus,X,Y))/(2._qp*delta)
+ endif
+
+end subroutine get_erec_cveff_qp
 
 !-----------------------------------------------------------------------
 !+

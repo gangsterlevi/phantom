@@ -21,6 +21,7 @@ module testeos
 !
  implicit none
  public :: test_eos
+ public :: test_eos_gasradrec
  public :: test_helmholtz ! to avoid compiler warning for unused routine
 
  private
@@ -36,7 +37,6 @@ subroutine test_eos(ntests,npass)
  use io,            only:id,master,stdout
  use physcon,       only:solarm
  use units,         only:set_units
- use eos_gasradrec, only:irecomb
  use ionization_mod, only:ionization_setup
  use testeos_stratified, only:test_eos_stratified
  use test_eos_stam, only:run_test_stam
@@ -66,9 +66,7 @@ subroutine test_eos(ntests,npass)
  !  call test_helmholtz(ntests, npass)
  call test_idealplusrad(ntests, npass)
 
- do irecomb = 0,3
-    call test_hormone(ntests,npass)
- enddo
+ call test_eos_gasradrec(ntests,npass)
 
  call test_eos_stratified(ntests,npass)
  call run_test_stam(ntests,npass)
@@ -76,6 +74,21 @@ subroutine test_eos(ntests,npass)
  if (id==master) write(*,"(/,a)") '<-- EQUATION OF STATE TEST COMPLETE'
 
 end subroutine test_eos
+
+! Also callable on its own, without unrelated tabulated EOS data files.
+subroutine test_eos_gasradrec(ntests,npass)
+ use eos_gasradrec, only:irecomb
+ use units, only:set_units
+ use physcon, only:solarm
+ integer, intent(inout) :: ntests,npass
+
+ call set_units(mass=solarm,dist=1.d16,G=1.d0)
+ do irecomb=0,3
+    call test_hormone(ntests,npass)
+    call test_hormone_quad(ntests,npass)
+ enddo
+
+end subroutine test_eos_gasradrec
 
 subroutine benchmark_get_xion
  integer, parameter :: nbench=1000000,nrep=5
@@ -474,6 +487,8 @@ subroutine test_hormone(ntests, npass)
        tempi = 1.
        eni_code = eni/unit_ergg
        rhocodei = rhogrid(i)/unit_density
+       mu2 = mu
+       gamma_eff = gamma
        call equationofstate(ieos,ponrhoi,csound,rhocodei,0.,0.,0.,tempi,eni_code,&
                             mu_local=mu2,Xlocal=X,Zlocal=Z,gamma_local=gamma_eff)  ! mu and gamma_eff are outputs
        pres2 = ponrhoi * rhocodei * unit_pressure
@@ -503,6 +518,91 @@ subroutine test_hormone(ntests, npass)
  call update_test_scores(ntests,nfail,npass)
 
 end subroutine test_hormone
+
+!----------------------------------------------------------------------------
+!+
+!  Exercise recovery with missing/poor guesses, including the Heian crash
+!  neighbourhood. Check the returned double-precision temperature against
+!  quad-precision energy and pressure residuals, with eoserr unchanged.
+!+
+!----------------------------------------------------------------------------
+subroutine test_hormone_quad(ntests,npass)
+ use eos_gasradrec, only:equationofstate_gasradrec,calc_uT_from_rhoP_gasradrec,init_eos_gasradrec
+ use ionization_mod, only:qp,get_erec_cveff_qp
+ use physcon, only:Rg,radconst
+ use io, only:id,master
+ use testutils, only:checkval,checkvalbuf,checkvalbuf_end,update_test_scores
+ use, intrinsic :: ieee_arithmetic, only:ieee_value,ieee_positive_inf
+ integer, intent(inout) :: ntests,npass
+ integer, parameter :: ncase=6
+ real, parameter :: densities(ncase)=[1.e-16,1.e-10,3.837070015716256e-10,1.e-8,1.e-6,1.e-12]
+ real, parameter :: temperatures(ncase)=[100.,2500.,12739.2678700768,4.e4,1.e6,1.e7]
+ real, parameter :: X=0.71799999849772533,Y=0.26797147940625954,tol=1.e-15
+ real :: rho,T,imu,p,cs,gamma,u,target,pressure,errmax(2),err
+ real(qp) :: dq,Tq,logdq,er,cv,imq,de,dc,dm,Rgq,aq,f,df,energyq,pressureq
+ integer :: i,mode,ierr,nfail(3),ncheck(2),nfailed
+ logical :: transport
+
+ if (id==master) write(*,'(/,a)') '--> testing bracketed quad-precision HORMONE fallback'
+ call init_eos_gasradrec(ierr)
+ nfail=0; ncheck=0; errmax=0.
+ Rgq=real(Rg,qp); aq=real(radconst,qp)
+ do mode=0,1
+    transport=mode==1
+    do i=1,ncase
+       rho=densities(i); dq=real(rho,qp); logdq=log10(dq)
+       Tq=real(temperatures(i),qp)
+       call get_erec_cveff_qp(logdq,Tq,real(X,qp),real(Y,qp),er,cv,imq)
+       energyq=dq*(Rgq*cv*Tq+er)
+       pressureq=dq*Rgq*imq*Tq
+       if (.not.transport) then
+          energyq=energyq+aq*Tq**4
+          pressureq=pressureq+aq*Tq**4/3._qp
+       endif
+       target=real(energyq); pressure=real(pressureq)
+
+       ! A missing guess goes straight to the bracketed fallback.
+       T=0.
+       call equationofstate_gasradrec(rho,target,T,imu,X,Y,p,cs,gamma,do_radiation=transport)
+       Tq=real(T,qp)
+       call get_erec_cveff_qp(logdq,Tq,real(X,qp),real(Y,qp),er,cv,imq,de,dc)
+       f=dq*(Rgq*cv*Tq+er)-real(target,qp)
+       df=dq*(Rgq*(cv+dc)+de)
+       if (.not.transport) then
+          f=f+aq*Tq**4
+          df=df+4._qp*aq*Tq**3
+       endif
+       err=real(abs(f/(df*Tq)))
+       call checkvalbuf(err,0.,tol,'quad rho,u correction/T',nfail(1),ncheck(1),errmax(1))
+
+       ! A nonfinite guess bypasses both Newton tiers and exercises tier 3.
+       T=ieee_value(1.,ieee_positive_inf)
+       call calc_uT_from_rhoP_gasradrec(rho,pressure,X,Y,T,u,ierr=ierr,do_radiation=transport)
+       call checkval(ierr==0,.true.,nfailed,'quad rho,P converged')
+       nfail(3)=nfail(3)+nfailed
+       if (ierr /= 0) cycle
+       Tq=real(T,qp)
+       call get_erec_cveff_qp(logdq,Tq,real(X,qp),real(Y,qp),er,cv,imq,dimurecdlnT=dm)
+       f=dq*Rgq*imq*Tq-real(pressure,qp)
+       df=dq*Rgq*(imq+dm)
+       if (.not.transport) then
+          f=f+aq*Tq**4/3._qp
+          df=df+4._qp*aq*Tq**3/3._qp
+       endif
+       err=real(abs(f/(df*Tq)))
+       call checkvalbuf(err,0.,tol,'quad rho,P correction/T',nfail(2),ncheck(2),errmax(2))
+    enddo
+ enddo
+ ! Invalid targets must still fail instead of being accepted as roundoff.
+ T=1.
+ call calc_uT_from_rhoP_gasradrec(1.e-10,-1.,X,Y,T,u,ierr=ierr)
+ call checkval(ierr==1,.true.,nfailed,'negative pressure rejected')
+ nfail(3)=nfail(3)+nfailed
+ call checkvalbuf_end('quad rho,u correction/T',ncheck(1),nfail(1),errmax(1),tol)
+ call checkvalbuf_end('quad rho,P correction/T',ncheck(2),nfail(2),errmax(2),tol)
+ call update_test_scores(ntests,nfail,npass)
+
+end subroutine test_hormone_quad
 
 !----------------------------------------------------------------------------
 !+
