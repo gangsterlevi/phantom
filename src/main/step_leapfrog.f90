@@ -26,7 +26,7 @@ module step_lf_global
 !   cooling_radapprox, damping, deriv, dim, dynamic_dtmax, eos, extern_gr,
 !   growth, io, io_summary, metric_tools, mpiutils, options, part,
 !   porosity, ptmass, shock_capturing, substepping, timestep, timestep_ind,
-!   timing
+!   timing, utils_gr
 !
  use dim,  only:maxp,maxvxyzu,do_radiation,ind_timesteps
  use part, only:vpred,Bpred,dustpred,ppred
@@ -63,7 +63,8 @@ subroutine init_step(npart,time,dtmax)
  !
  if (ind_timesteps) then
     if (time < tiny(time)) then
-       !$omp parallel do schedule(static) private(i)
+       !$omp parallel do schedule(static) default(none) &
+       !$omp shared(npart,ibin,nbinmax,iphase) private(i)
        do i=1,npart
           ibin(i) = nbinmax
           if (iamboundary(iamtype(iphase(i)))) ibin(i) = 0
@@ -73,7 +74,8 @@ subroutine init_step(npart,time,dtmax)
     ! twas is set so that at start of step we predict
     ! forwards to half of current timestep
     !
-    !$omp parallel do schedule(static) private(i)
+    !$omp parallel do schedule(static) default(none) &
+    !$omp shared(npart,twas,time,dtmax,ibin) private(i)
     do i=1,npart
        twas(i) = time + 0.5*get_dt(dtmax,ibin(i))
     enddo
@@ -135,6 +137,7 @@ subroutine step(npart,nactive,t,dtsph,dtextforce,dtnew)
  use porosity,       only:get_filfac
  use damping,        only:idamp
  use cons2primsolver, only:conservative2primitive,primitive2conservative
+ use utils_gr,        only:get_u0
  use eos,             only:equationofstate
  use substepping,     only:substep,substep_gr,substep_sph_gr,substep_sph
  use ptmass,         only:ptmass_kick
@@ -144,15 +147,17 @@ subroutine step(npart,nactive,t,dtsph,dtextforce,dtnew)
  real,    intent(inout) :: dtextforce
  real,    intent(out)   :: dtnew
  integer            :: i,its,np,ntypes,itype,nwake,nvfloorp,nvfloorps,nvfloorc,ialphaloc
- real               :: timei,erri,errmax,v2i,errmaxmean
+ real               :: timei,erri,errmax,v2i,errmaxmean,omega,errmax_prev
  real               :: vxi,vyi,vzi,eni,hdtsph
- real               :: alphaloci,source,tdecay1,hi,rhoi,ddenom,spsoundi
+ real               :: alphaloci,source,tdecay1,hi,rhoi,ddenom,spsoundi,u0i
+ integer            :: ierru0
  real               :: v2mean,hdti
  real(kind=4)       :: t1,t2,tcpu1,tcpu2
  real               :: pxi,pyi,pzi,p2i,p2mean
  real               :: dti,time_now
  logical, parameter :: allow_waking = .true.
  integer, parameter :: maxits = 30
+ real,    parameter :: omegamin = 0.1  ! minimum damping factor in the velocity iterations
  logical            :: converged,store_itype
 
 !
@@ -302,12 +307,12 @@ subroutine step(npart,nactive,t,dtsph,dtextforce,dtnew)
 !$omp shared(Bevol,dBevol,Bpred,dtsph,iphase) &
 !$omp shared(dustevol,ddustprop,dustprop,dustproppred,dustfrac,ddustevol,dustpred,use_dustfrac) &
 !$omp shared(filfac,filfacpred,use_porosity) &
-!$omp shared(alphaind,alphamax,ialphaloc) &
+!$omp shared(alphaind,alphamax,ialphaloc,metrics) &
 !$omp shared(eos_vars,ufloor,icooling,Tfloor) &
 !$omp shared(twas,timei) &
 !$omp shared(rad,drad,radpred)&
 !$omp private(hi,rhoi,tdecay1,source,ddenom,hdti) &
-!$omp private(i,spsoundi,alphaloci) &
+!$omp private(i,spsoundi,alphaloci,u0i,ierru0) &
 !$omp firstprivate(itype,alpha) &
 !$omp reduction(+:nvfloorps)
  predict_sph: do i=1,npart
@@ -381,6 +386,11 @@ subroutine step(npart,nactive,t,dtsph,dtextforce,dtnew)
           rhoi = rho(i)
           spsoundi = eos_vars(ics,i)
           tdecay1  = avdecayconst*spsoundi/hi
+          if (gr) then
+             ! decay over the proper time of the fluid, dtau = dt/U^0
+             call get_u0(metrics(:,:,1,i),vxyzu(1:3,i),u0i,ierru0)
+             tdecay1 = tdecay1/u0i
+          endif
           ddenom   = 1./(1. + dtsph*tdecay1) ! implicit integration for decay term
           if (nalpha >= 2) then
              ! Cullen and Dehnen (2010) switch
@@ -449,6 +459,8 @@ subroutine step(npart,nactive,t,dtsph,dtextforce,dtnew)
  its        = 0
  converged  = .false.
  errmaxmean = 0.0
+ omega       = 1.
+ errmax_prev = huge(errmax_prev)
  nwake      = 0
  nvfloorc   = 0
  iterations: do while (its < maxits .and. .not.converged .and. npart > 0)
@@ -635,11 +647,15 @@ subroutine step(npart,nactive,t,dtsph,dtextforce,dtnew)
     else
        call check_velocity_error(errmax,v2mean,np,its,tolv,dtsph,timei,idamp,dterr,errmaxmean,converged)
     endif
+    ! damp the fixed point iteration for velocity-dependent forces if the error is decreasing
+    ! slowly, i.e. by less than a factor of 2, as when the iterations oscillate
+    if (.not.converged .and. its > 1 .and. errmax > 0.5*errmax_prev) omega = max(0.5*omega,omegamin)
+    errmax_prev = errmax
 
     if (.not.converged .and. npart > 0) then
 !$omp parallel do default(none)&
 !$omp private(i) &
-!$omp shared(npart,hdtsph)&
+!$omp shared(npart,hdtsph,omega)&
 !$omp shared(store_itype,vxyzu,fxyzu,vpred,iphase) &
 !$omp shared(Bevol,dBevol,Bpred,pxyzu,ppred) &
 !$omp shared(dustprop,ddustprop,dustproppred,use_dustfrac,dustevol,dustpred,ddustevol) &
@@ -654,9 +670,9 @@ subroutine step(npart,nactive,t,dtsph,dtextforce,dtnew)
           if (ind_timesteps) then
              if (iactive(iphase(i))) then
                 if (gr) then
-                   ppred(:,i) = pxyzu(:,i)
+                   call update_prediction(ppred(:,i),pxyzu(:,i),omega)
                 else
-                   vpred(:,i) = vxyzu(:,i)
+                   call update_prediction(vpred(:,i),vxyzu(:,i),omega)
                 endif
                 if (use_dustgrowth) dustproppred(:,i) = dustprop(:,i)
                 if (use_porosity) filfacpred(i) = filfac(i)
@@ -666,9 +682,9 @@ subroutine step(npart,nactive,t,dtsph,dtextforce,dtnew)
              endif
           else
              if (gr) then
-                ppred(:,i) = pxyzu(:,i)
+                call update_prediction(ppred(:,i),pxyzu(:,i),omega)
              else
-                vpred(:,i) = vxyzu(:,i)
+                call update_prediction(vpred(:,i),vxyzu(:,i),omega)
              endif
              if (use_dustgrowth) dustproppred(:,i) = dustprop(:,i)
              if (use_porosity) filfacpred(i) = filfac(i)
@@ -758,6 +774,25 @@ subroutine step(npart,nactive,t,dtsph,dtextforce,dtnew)
  if (gr) call cons2primall(npart,xyzh,metrics,pxyzu,vxyzu,dens,eos_vars)
 
 end subroutine step
+
+!----------------------------------------------------------------
+!+
+!  update the prediction used in the fixed point iterations for
+!  velocity-dependent forces, damped by omega (< 1) if the
+!  iterations are not converging
+!+
+!----------------------------------------------------------------
+pure subroutine update_prediction(xpred,xnew,omega)
+ real, intent(inout) :: xpred(:)
+ real, intent(in)    :: xnew(:),omega
+
+ if (omega < 1.) then
+    xpred = xpred + omega*(xnew - xpred)
+ else
+    xpred = xnew
+ endif
+
+end subroutine update_prediction
 
 !-----------------------------------------------------
 !+

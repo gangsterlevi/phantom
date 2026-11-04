@@ -46,8 +46,8 @@ module setup
 ! :Dependencies: boundary, centreofmass, datafiles, dim, dynamic_dtmax,
 !   eos, eos_barotropic, infile_utils, io, io_control, kernel, mpidomain,
 !   options, part, physcon, prompting, ptmass, rho_profile,
-!   set_dust_options, setunits, setup_params, spherical, systemutils,
-!   timestep, unifdis, units, utils_shuffleparticles, velfield
+!   set_dust_options, setunits, setup_params, spherical, timestep, unifdis,
+!   units, utils_shuffleparticles, velfield
 !
  use part,     only:mhd,graindens,grainsize,ndusttypes,ndustsmall,ndustlarge,rho
  use dim,      only:use_dust,maxvxyzu,periodic,maxdustsmall,gr,isothermal
@@ -97,7 +97,9 @@ subroutine setpart(id,npart,npartoftype,xyzh,massoftype,vxyzu,polyk,gamma,hfact,
  use setup_params, only:npart_total
  use io,           only:master,fatal
  use eos,          only:polyk2
- use part,         only:Bxyz,igas,idust,set_particle_type
+ use part,         only:Bxyz,igas,idust,set_particle_type,rad,rho,init_rho_from_h
+ use dim,          only:do_radiation
+ use radiation_utils, only:set_radiation_and_gas_temperature_equal
  use set_dust_options, only:dustbinfrac,set_dust_grain_distribution,dtg=>dust_to_gas,&
                             ndustsmallinp,ndustlargeinp,dust_method
  use options,      only:use_dustfrac
@@ -156,6 +158,12 @@ subroutine setpart(id,npart,npartoftype,xyzh,massoftype,vxyzu,polyk,gamma,hfact,
 
  ! add uniform rotation (in velocity and magnetic field)
  call set_rotating_sphere(npart,xyzh,vxyzu,Bxyz,dens_sphere,cs_sphere,cs_medium,angvel_code,Bzero)
+
+ ! start the radiation field in equilibrium with the gas
+ if (do_radiation) then
+    call init_rho_from_h()
+    call set_radiation_and_gas_temperature_equal(npart,vxyzu,rho,rad)
+ endif
 
  ! amend .in file as necessary
  call setup_runtime_parameters(fileprefix,t_ff,h_acc_setup)
@@ -886,7 +894,6 @@ subroutine setup_interactive()
  use units,            only:udist,umass
  use physcon,          only:au,solarm
  use set_dust_options, only:set_dust_interactive
- use systemutils,      only:get_command_option
  integer :: ilattice,npmax
  character(len=100) :: string
  logical :: make_sinks
@@ -902,7 +909,6 @@ subroutine setup_interactive()
  elseif (npmax < np) then
     np = 300000
  endif
- np = int(get_command_option('np',default=np)) ! can override default value with flag e.g. --np=1000 (mainly for test suite)
  call prompt('Enter the approximate number of particles in the sphere',np,0,npmax)
 
  ilattice = i_closepacked
