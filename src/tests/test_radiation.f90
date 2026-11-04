@@ -198,7 +198,8 @@ subroutine test_exchange_terms(ntests,npass,use_implicit)
        exchange_radiation_energy = .false.
        u_before = vxyzu(4,1)
        xi_before = rad(iradxi,1)
-       call do_radiation_implicit(1.e-12*seconds/utime,npart,rad,xyzh,vxyzu,radprop,drad,ierr)
+       radprop(itlastrad,1:npart) = 0.
+       call do_radiation_implicit(1.e-12*seconds/utime,1.e-12*seconds/utime,npart,rad,xyzh,vxyzu,radprop,drad,ierr)
        call checkval(ierr,0,0,nerr(1),'implicit exchange disabled: solver status')
        call update_test_scores(ntests,nerr,npass)
        call checkval(maxval(abs(vxyzu(4,1:npart)/u_before-1.)),0.,1.e-12,nerr(1),&
@@ -273,7 +274,7 @@ end subroutine test_exchange_terms
 ! A uniform radiation field in LTE must remain in equilibrium even when
 ! particles have different compositions from the global EoS defaults.
 subroutine test_exchange_equilibrium_composition(ntests,npass)
- use part, only:npart,xyzh,vxyzu,rad,radprop,drad,rho,eos_vars,iX,iZ,dvdx,luminosity
+ use part, only:npart,xyzh,vxyzu,rad,radprop,drad,rho,eos_vars,iX,iZ,dvdx,luminosity,itlastrad
  use radiation_utils, only:cv_type,radxi_from_Trad
  use radiation_implicit, only:do_radiation_implicit
  use eos, only:use_var_comp
@@ -306,7 +307,8 @@ subroutine test_exchange_equilibrium_composition(ntests,npass)
     enddo
     u0 = vxyzu(4,1:npart)
     xi0 = rad(iradxi,1:npart)
-    call do_radiation_implicit(1.e-3/utime,npart,rad,xyzh,vxyzu,radprop,drad,ierr)
+    radprop(itlastrad,1:npart) = 0.
+    call do_radiation_implicit(1.e-3/utime,1.e-3/utime,npart,rad,xyzh,vxyzu,radprop,drad,ierr)
     call checkval(ierr,0,0,nerr(1),'composition-dependent LTE: solver status')
     call checkval(maxval(abs(vxyzu(4,1:npart)/u0-1.)),0.,1.e-8,nerr(2),&
                   'composition-dependent LTE: gas energy unchanged')
@@ -324,7 +326,7 @@ end subroutine test_exchange_equilibrium_composition
 ! Reaching the cap must return on every OpenMP thread, including when one
 ! thread reaches the next iteration before another checks whether to stop.
 subroutine test_implicit_iteration_limit(ntests,npass)
- use part, only:npart,xyzh,vxyzu,rad,radprop,drad
+ use part, only:npart,xyzh,vxyzu,rad,radprop,drad,itlastrad
  use radiation_utils, only:itsmax_rad,tol_rad
  use radiation_implicit, only:do_radiation_implicit,ierr_failed_to_converge,its_global
  use units, only:utime
@@ -344,8 +346,9 @@ subroutine test_implicit_iteration_limit(ntests,npass)
     rad(iradxi,1:npart) = xi0
     ! Drive a local gas-radiation imbalance requiring more than a few sweeps.
     rad(iradxi,1) = 2.*xi0(1)
+    radprop(itlastrad,1:npart) = 0.
     itsmax_rad = limit
-    call do_radiation_implicit(1.e-3/utime,npart,rad,xyzh,vxyzu,radprop,drad,ierr)
+    call do_radiation_implicit(1.e-3/utime,1.e-3/utime,npart,rad,xyzh,vxyzu,radprop,drad,ierr)
     call checkval(ierr,ierr_failed_to_converge,0,nerr(1),'implicit iteration cap returns nonconvergence status')
     call checkval(its_global,limit,0,nerr(2),'all threads stop at the radiation iteration cap')
     call update_test_scores(ntests,nerr,npass)

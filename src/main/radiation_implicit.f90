@@ -22,7 +22,8 @@ module radiation_implicit
 !   mpiradiation, mpiutils, neighcompact, part, physcon, quartic,
 !   radiation_utils, timing, units
 !
- use part,            only:ikappa,ilambda,iedd,idkappa,iradxi,icv,ifluxx,ifluxy,ifluxz,igas,rho,massoftype,imu
+ use part,            only:ikappa,ilambda,iedd,idkappa,iradxi,icv,ifluxx,ifluxy,ifluxz,igas,&
+                           rho,get_pmass,imu,itlastrad
  use eos,             only:iopacity_type,get_cv,eos_outputs_mu,use_var_comp
  use part,            only:iX,iZ,itemp,particle_eos_vars=>eos_vars
  use radiation_utils, only:get_kappa,tol_rad,itsmax_rad,cv_type
@@ -44,8 +45,9 @@ module radiation_implicit
  logical, parameter :: use_photoelectric_heating = .false.
  real, parameter    :: Tdust_threshold = 100.
 
- real, public :: rad_errorE,rad_errorU
- integer, public :: its_global
+ ! Energy diagnostics can be requested before the first radiation solve.
+ real, public :: rad_errorE = 0.,rad_errorU = 0.
+ integer, public :: its_global = 0
 
  character(len=*), parameter :: label = 'radiation_implicit'
 
@@ -223,7 +225,7 @@ subroutine load_EU0(i,rad,vxyzu,radprop,EU0)
 
  EU0(1,i) = rad(iradxi,i)
  EU0(2,i) = vxyzu(4,i)
- EU0(3,i) = get_cv(cv_type,rho(i),vxyzu(4,i))
+ EU0(3,i) = get_cv_particle(i,rho(i),vxyzu(4,i))
  EU0(4,i) = get_kappa(iopacity_type,vxyzu(4,i),EU0(3,i),rho(i))
  EU0(5,i) = radprop(ilambda,i)
  EU0(6,i) = radprop(iedd,i)
@@ -274,15 +276,21 @@ subroutine do_radiation_onestep(dt,time,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,
  use timing,  only:get_timings
  use derivutils, only:do_timing
  use implicit,   only:allocate_memory_implicit,icompactmax,ivar,ijvar,ncompact,ncompactlocal,&
-                      varij,varij2,varinew,vari,mask
+                      varij,varij2,varinew,vari,mask,grow_neighbour_storage_implicit
  use radiation_utils, only:implicit_radiation_store_drad,exchange_radiation_energy
- real,    intent(in)    :: dt,xyzh(:,:),origEU(:,:)
+ use dim,             only:mpi
+ use io,              only:id,master
+ use mpiutils,        only:reduceall_mpi
+ use mpiradiation,    only:icand_start,icand,xyzh_remote,exchange_remote_values
+ real,    intent(in)    :: dt,time,xyzh(:,:),origEU(:,:)
  integer, intent(in)    :: npart
  real,    intent(inout) :: radprop(:,:),rad(:,:),vxyzu(:,:)
  logical, intent(out)   :: failed,moresweep
  integer, intent(out)   :: nit,ierr
- real,    intent(out)   :: maxerrE2,maxerrU2,EU0(6,npart)
- integer              :: its,nslow(npart)
+ real,    intent(out)   :: maxerrE2,maxerrU2
+ real,    intent(inout) :: EU0(:,:)
+ integer              :: its,nedges,nslow(npart)
+ real                 :: errmax(3)
  real                 :: maxerrE2last,maxerrU2last,maxerrE2last2,maxerrU2last2,omega,maxerrE2prev2,maxerrU2prev2
  real                 :: dUlast(npart)
  real(kind=4)         :: tlast,tcpulast,t1,tcpu1
@@ -332,10 +340,10 @@ subroutine do_radiation_onestep(dt,time,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,
  !$omp shared(pdvvisc,dvdx,nucleation,dust_temp,eos_vars,drad,fxyzu,implicit_radiation_store_drad) &
  !$omp shared(exchange_radiation_energy) &
  !$omp shared(converged,stop_iterations,maxerrE2,maxerrU2,maxerrE2last,maxerrU2last,itsmax_rad) &
- !$omp shared(moresweep,tol_rad,iverbose,ierr) &
+ !$omp shared(moresweep,tol_rad,iverbose,ierr,errmax) &
  !$omp shared(maxerrE2last2,maxerrU2last2,maxerrE2prev2,maxerrU2prev2,omega,its,dUlast,nslow,damp_oscillations)
- call fill_arrays(ncompact,ncompactlocal,npart,icompactmax,dt,&
-                  xyzh,vxyzu,ivar,ijvar,rad,vari,varij,varij2,EU0)
+ call fill_arrays(ncompact,ncompactlocal,npart,icompactmax,dt,time,&
+                  xyzh,vxyzu,ivar,ijvar,rad,radprop,vari,varij,varij2,EU0)
 
  !$omp single
  call do_timing('radarrays',tlast,tcpulast)
@@ -383,6 +391,14 @@ subroutine do_radiation_onestep(dt,time,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,
     !$omp end single
 
     !$omp single
+    ! Count sweeps and synchronize errors before any thread decides to stop.
+    its = its + 1
+    if (mpi) then
+       errmax = reduceall_mpi('max',[maxerrE2,maxerrU2,merge(1.,0.,damp_oscillations)])
+       maxerrE2 = errmax(1)
+       maxerrU2 = errmax(2)
+       damp_oscillations = errmax(3) > 0.
+    endif
     ! A component already below tolerance must not trigger cycle damping.
     maxerrE2prev2 = bignumber
     maxerrU2prev2 = bignumber
@@ -506,10 +522,8 @@ subroutine fill_arrays(ncompact,ncompactlocal,npart,icompactmax,dt,time,xyzh,vxy
        rhoi = rho(i)
        zetaomegai = real(gradh(igradzeta,i))*real(gradh(igradomega,i))
 
-       EU0(1,i) = rad(iradxi,i)
-       EU0(2,i) = vxyzu(4,i)
-       EU0(3,i) = get_cv_particle(i,rhoi,vxyzu(4,i))
-       EU0(4,i) = get_kappa(iopacity_type,vxyzu(4,i),EU0(3,i),rhoi)
+       ! Preserve the flux limiter and Eddington factor for masked particles.
+       call load_EU0(i,rad,vxyzu,radprop,EU0)
        !
        !--Diffuse ISM: Set dust temperature and opacity
        !
@@ -554,18 +568,6 @@ subroutine fill_arrays(ncompact,ncompactlocal,npart,icompactmax,dt,time,xyzh,vxy
           rij = sqrt(rij2)
           rij1 = 1./rij
           dr = rij
-
-          pmj = massoftype(igas)
-          rhoj = rho(j)
-          !
-          !--Need to make sure that E and U values are loaded for non-active neighbours
-          !
-          if (ind_timesteps) then
-             EU0(1,j) = rad(iradxi,j)
-             EU0(2,j) = vxyzu(4,j)
-             EU0(3,j) = get_cv_particle(j,rhoj,vxyzu(4,j))
-             EU0(4,j) = get_kappa(iopacity_type,vxyzu(4,j),EU0(3,j),rhoj)
-          endif
 
           hj21 = 1./(hj*hj)
           hj41 = hj21*hj21
@@ -775,6 +777,7 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
                                        radprop,rad,origEU,varinew,EU0,&
                                        pdvvisc,dvdx,nucleation,dust_temp,eos_vars,drad,fxyzu, &
                                        mask,store_drad,moresweep,maxerrE2,maxerrU2,omega,dUlast,nslow,damp_oscillations)
+ use, intrinsic :: ieee_arithmetic, only:ieee_is_nan
  use io,      only:fatal,error
  use units,   only:get_radconst_code,get_c_code,unit_density
  use physcon, only:mass_proton_cgs
@@ -786,7 +789,7 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
  real(kind=4), intent(in)    :: pdvvisc(:),dvdx(:,:)
  real,         intent(in)    :: eos_vars(:,:)
  real,         intent(inout) :: drad(:,:),fxyzu(:,:),nucleation(:,:),dust_temp(:)
- real,         intent(inout) :: radprop(:,:),EU0(6,npart),omega
+ real,         intent(inout) :: radprop(:,:),EU0(:,:),omega
  real,         intent(inout) :: dUlast(npart)
  integer,      intent(inout) :: nslow(npart)
  real,         intent(out)   :: maxerrE2,maxerrU2

@@ -955,7 +955,7 @@ subroutine read_options_relax(db,nerr,relax,ieos)
  use dim,          only:do_radiation
  use radiation_utils, only:exchange_radiation_energy,limit_radiation_flux,tol_rad,itsmax_rad,cv_type,kappa_cgs
  use eos,          only:iopacity_type
- type(inopts), allocatable, intent(inout) :: db(:)
+ type(inopts),              intent(inout) :: db(:)
  integer,                   intent(inout) :: nerr
  logical,                   intent(in)    :: relax
  integer,                   intent(in)    :: ieos

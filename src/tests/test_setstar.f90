@@ -45,6 +45,8 @@ subroutine test_setstar(ntests,npass)
 
  ! test the get_mass_coordinate routine in relax_star
  call test_get_mass_coord(ntests,npass)
+ call test_shift_star_corotate(ntests,npass)
+ call test_spin_options(ntests,npass)
  call test_radrelax_energy_change(ntests,npass)
  call test_constant_entropy_core(ntests,npass)
  call test_stellar_orbital_placement(ntests,npass)
