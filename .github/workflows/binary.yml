@@ -21,6 +21,7 @@ jobs:
       uses: fortran-lang/setup-fortran@v1
       with:
          compiler: gcc
+         version: 15
 
     - name: Check gfortran version
       run: gfortran --version
