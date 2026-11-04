@@ -22,9 +22,9 @@ module radiation_implicit
 !   mpiradiation, mpiutils, neighcompact, part, physcon, quartic,
 !   radiation_utils, timing, units
 !
- use part,            only:ikappa,ilambda,iedd,idkappa,iradxi,icv,ifluxx,ifluxy,ifluxz,igas,&
-                           rho,get_pmass,imu,itlastrad
- use eos,             only:iopacity_type,get_cv,eos_outputs_mu
+ use part,            only:ikappa,ilambda,iedd,idkappa,iradxi,icv,ifluxx,ifluxy,ifluxz,igas,rho,massoftype,imu
+ use eos,             only:iopacity_type,get_cv,eos_outputs_mu,use_var_comp
+ use part,            only:iX,iZ,itemp,particle_eos_vars=>eos_vars
  use radiation_utils, only:get_kappa,tol_rad,itsmax_rad,cv_type
  use neighcompact,    only:get_compacted_neighbour_list
  implicit none
@@ -54,6 +54,37 @@ module radiation_implicit
  public :: tol_rad ! so that use radiation_implicit, only:tol_rad works
 
 contains
+
+! Use the same composition as the particle EoS when converting energy to
+! temperature. The implicit solver needs u/T, not the derivative du/dT.
+real function get_cv_particle(i,rhoi,ui,temperature_guess) result(cv)
+ integer, intent(in) :: i
+ real, intent(in) :: rhoi,ui
+ real, intent(in), optional :: temperature_guess
+ real :: guess
+
+ ! A guess is local to this call: never cache an EOS result for a changed
+ ! energy, density or composition. Other cv_type values keep their old path.
+ if (cv_type==20) then
+    guess = -1.
+    if (allocated(particle_eos_vars)) then
+       if (size(particle_eos_vars,1)>=itemp .and. i>=1 .and. i<=size(particle_eos_vars,2)) &
+          guess = particle_eos_vars(itemp,i)
+    endif
+    if (present(temperature_guess)) guess = temperature_guess
+    if (use_var_comp) then
+       cv = get_cv(cv_type,rhoi,ui,X_local=particle_eos_vars(iX,i),Z_local=particle_eos_vars(iZ,i),&
+                   temperature_guess=guess)
+    else
+       cv = get_cv(cv_type,rhoi,ui,temperature_guess=guess)
+    endif
+    return
+ endif
+
+ cv = get_cv(cv_type,rhoi,ui)
+
+end function get_cv_particle
+
 
 !---------------------------------------------------------
 !+
@@ -221,7 +252,7 @@ subroutine save_radiation_energies(npart,rad,xyzh,vxyzu,radprop,drad,origEU,save
     origEU(2,i) = vxyzu(4,i)
     if (save_cv) then
        rhoi = rho(i)
-       radprop(icv,i) = get_cv(cv_type,rhoi,vxyzu(4,i))
+       radprop(icv,i) = get_cv_particle(i,rhoi,vxyzu(4,i))
        radprop(ikappa,i) = get_kappa(iopacity_type,vxyzu(4,i),radprop(icv,i),rhoi)
     endif
     drad(:,i) = 0.  ! Set dxi/dt = 0 for implicit scheme
@@ -243,24 +274,20 @@ subroutine do_radiation_onestep(dt,time,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,
  use timing,  only:get_timings
  use derivutils, only:do_timing
  use implicit,   only:allocate_memory_implicit,icompactmax,ivar,ijvar,ncompact,ncompactlocal,&
-                      varij,varij2,varinew,vari,mask,grow_neighbour_storage_implicit
- use radiation_utils, only:implicit_radiation_store_drad
- use dim,             only:mpi
- use io,              only:id,master
- use mpiutils,        only:reduceall_mpi
- use mpiradiation,    only:icand_start,icand,xyzh_remote,exchange_remote_values
- real,    intent(in)    :: dt,time,xyzh(:,:),origEU(:,:)
+                      varij,varij2,varinew,vari,mask
+ use radiation_utils, only:implicit_radiation_store_drad,exchange_radiation_energy
+ real,    intent(in)    :: dt,xyzh(:,:),origEU(:,:)
  integer, intent(in)    :: npart
  real,    intent(inout) :: radprop(:,:),rad(:,:),vxyzu(:,:)
  logical, intent(out)   :: failed,moresweep
  integer, intent(out)   :: nit,ierr
- real,    intent(out)   :: maxerrE2,maxerrU2,EU0(:,:)
- integer              :: its,nedges
- real                 :: errmax(2)
+ real,    intent(out)   :: maxerrE2,maxerrU2,EU0(6,npart)
+ integer              :: its,nslow(npart)
  real                 :: maxerrE2last,maxerrU2last,maxerrE2last2,maxerrU2last2,omega,maxerrE2prev2,maxerrU2prev2
+ real                 :: dUlast(npart)
  real(kind=4)         :: tlast,tcpulast,t1,tcpu1
  character(len=100)   :: warningstr
- logical              :: converged
+ logical              :: converged,stop_iterations,damp_oscillations
  real, parameter      :: limitcycletol = 1.e-3
  real, parameter      :: bignumber = 1.e29
 
@@ -303,10 +330,12 @@ subroutine do_radiation_onestep(dt,time,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,
  !$omp shared(tlast,tcpulast,t1,tcpu1,ncompact,ncompactlocal,npart,icompactmax,dt,time,its_global) &
  !$omp shared(xyzh,vxyzu,ivar,ijvar,varinew,radprop,rad,vari,varij,varij2,origEU,EU0,mask,rho) &
  !$omp shared(pdvvisc,dvdx,nucleation,dust_temp,eos_vars,drad,fxyzu,implicit_radiation_store_drad) &
- !$omp shared(converged,maxerrE2,maxerrU2,maxerrE2last,maxerrU2last,itsmax_rad,moresweep,tol_rad,iverbose,ierr) &
- !$omp shared(maxerrE2last2,maxerrU2last2,maxerrE2prev2,maxerrU2prev2,omega,its,errmax)
- call fill_arrays(ncompact,ncompactlocal,npart,icompactmax,dt,time,&
-                  xyzh,vxyzu,ivar,ijvar,rad,radprop,vari,varij,varij2,EU0)
+ !$omp shared(exchange_radiation_energy) &
+ !$omp shared(converged,stop_iterations,maxerrE2,maxerrU2,maxerrE2last,maxerrU2last,itsmax_rad) &
+ !$omp shared(moresweep,tol_rad,iverbose,ierr) &
+ !$omp shared(maxerrE2last2,maxerrU2last2,maxerrE2prev2,maxerrU2prev2,omega,its,dUlast,nslow,damp_oscillations)
+ call fill_arrays(ncompact,ncompactlocal,npart,icompactmax,dt,&
+                  xyzh,vxyzu,ivar,ijvar,rad,vari,varij,varij2,EU0)
 
  !$omp single
  call do_timing('radarrays',tlast,tcpulast)
@@ -317,13 +346,16 @@ subroutine do_radiation_onestep(dt,time,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,
  maxerrU2last = bignumber
  maxerrE2last2 = bignumber
  maxerrU2last2 = bignumber
+ dUlast = 0.
+ nslow = 0
  mask = .true.
  converged = .false.
+ stop_iterations = .false.
  its = 0
  !$omp end single
  call mask_updated_particles(ncompactlocal,ivar,vari,mask)
 
- iterations: do while (.not. converged)
+ iterations: do while (.not.stop_iterations)
 
     !$omp single
     call get_timings(t1,tcpu1)
@@ -343,24 +375,17 @@ subroutine do_radiation_onestep(dt,time,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,
     call update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
                                      radprop,rad,origEU,varinew,EU0,&
                                      pdvvisc,dvdx,nucleation,dust_temp,eos_vars,drad,fxyzu,&
-                                     mask,implicit_radiation_store_drad,moresweep,maxerrE2,maxerrU2,omega)
+                                     mask,implicit_radiation_store_drad,moresweep,maxerrE2,maxerrU2,omega,&
+                                     dUlast,nslow,damp_oscillations)
 
     !$omp single
     call do_timing('radupdate',t1,tcpu1)
     !$omp end single
 
     !$omp single
-    !--count the sweep here, before the barrier, so that no thread can change
-    !  its while others are still testing it against itsmax_rad below
-    its = its + 1
-    !--every MPI task needs the same errors, to take the same number of sweeps
-    if (mpi) then
-       errmax = reduceall_mpi('max',[maxerrE2,maxerrU2])
-       maxerrE2 = errmax(1)
-       maxerrU2 = errmax(2)
-    endif
-    maxerrE2prev2 = 0.
-    maxerrU2prev2 = 0.
+    ! A component already below tolerance must not trigger cycle damping.
+    maxerrE2prev2 = bignumber
+    maxerrU2prev2 = bignumber
     if (maxerrE2 > tol_rad) maxerrE2prev2 = abs(maxerrE2-maxerrE2last2)/maxerrE2
     if (maxerrU2 > tol_rad) maxerrU2prev2 = abs(maxerrU2-maxerrU2last2)/maxerrU2
     if (iverbose >= 2) then
@@ -372,11 +397,16 @@ subroutine do_radiation_onestep(dt,time,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,
     maxerrU2last = maxerrU2
     maxerrE2last = maxerrE2
 
-    ! limit cycle detector
-    if ((maxerrE2prev2 < limitcycletol) .or. (maxerrU2prev2 < limitcycletol)) omega = 0.5*omega
+    ! Damp persistent slow oscillations as well as settled limit cycles.
+    if (damp_oscillations .or. maxerrE2prev2 < limitcycletol .or. maxerrU2prev2 < limitcycletol) then
+       omega = 0.5*omega
+       dUlast = 0.
+       nslow = 0
+    endif
+    ! All threads must decide to stop in the same synchronized region.
+    ! Reading its after this barrier races with the next iteration's increment.
+    stop_iterations = converged .or. its >= itsmax_rad
     !$omp end single
-
-    if (its >= itsmax_rad) exit iterations
 
  enddo iterations
 
@@ -476,9 +506,10 @@ subroutine fill_arrays(ncompact,ncompactlocal,npart,icompactmax,dt,time,xyzh,vxy
        rhoi = rho(i)
        zetaomegai = real(gradh(igradzeta,i))*real(gradh(igradomega,i))
 
-       !--flux limiter and Eddington factor are from the last update, kept for particles
-       !  masked out of the solve; compute_flux overwrites them for the others
-       call load_EU0(i,rad,vxyzu,radprop,EU0)
+       EU0(1,i) = rad(iradxi,i)
+       EU0(2,i) = vxyzu(4,i)
+       EU0(3,i) = get_cv_particle(i,rhoi,vxyzu(4,i))
+       EU0(4,i) = get_kappa(iopacity_type,vxyzu(4,i),EU0(3,i),rhoi)
        !
        !--Diffuse ISM: Set dust temperature and opacity
        !
@@ -523,6 +554,18 @@ subroutine fill_arrays(ncompact,ncompactlocal,npart,icompactmax,dt,time,xyzh,vxy
           rij = sqrt(rij2)
           rij1 = 1./rij
           dr = rij
+
+          pmj = massoftype(igas)
+          rhoj = rho(j)
+          !
+          !--Need to make sure that E and U values are loaded for non-active neighbours
+          !
+          if (ind_timesteps) then
+             EU0(1,j) = rad(iradxi,j)
+             EU0(2,j) = vxyzu(4,j)
+             EU0(3,j) = get_cv_particle(j,rhoj,vxyzu(4,j))
+             EU0(4,j) = get_kappa(iopacity_type,vxyzu(4,j),EU0(3,j),rhoj)
+          endif
 
           hj21 = 1./(hj*hj)
           hj41 = hj21*hj21
@@ -731,22 +774,24 @@ end subroutine calc_diffusion_term
 subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
                                        radprop,rad,origEU,varinew,EU0,&
                                        pdvvisc,dvdx,nucleation,dust_temp,eos_vars,drad,fxyzu, &
-                                       mask,store_drad,moresweep,maxerrE2,maxerrU2,omega)
- use, intrinsic :: ieee_arithmetic, only:ieee_is_nan
+                                       mask,store_drad,moresweep,maxerrE2,maxerrU2,omega,dUlast,nslow,damp_oscillations)
  use io,      only:fatal,error
  use units,   only:get_radconst_code,get_c_code,unit_density
  use physcon, only:mass_proton_cgs
  use eos,     only:metallicity=>Z_in
  use part,    only:iphase,iamtype,iboundary
+ use radiation_utils, only:exchange_radiation_energy
  integer,      intent(in)    :: ivar(:,:),npart,ncompactlocal
  real,         intent(in)    :: vari(:,:),varinew(3,npart),rad(:,:),origEU(:,:)
  real(kind=4), intent(in)    :: pdvvisc(:),dvdx(:,:)
  real,         intent(in)    :: eos_vars(:,:)
  real,         intent(inout) :: drad(:,:),fxyzu(:,:),nucleation(:,:),dust_temp(:)
- real,         intent(inout) :: radprop(:,:),EU0(:,:),omega
+ real,         intent(inout) :: radprop(:,:),EU0(6,npart),omega
+ real,         intent(inout) :: dUlast(npart)
+ integer,      intent(inout) :: nslow(npart)
  real,         intent(out)   :: maxerrE2,maxerrU2
  logical,      intent(in)    :: store_drad
- logical,      intent(out)   :: moresweep
+ logical,      intent(out)   :: moresweep,damp_oscillations
  logical,      intent(inout) :: mask(npart)
  integer             :: i,n,ieqtype,ierr
  logical             :: moresweep2,skip_quartic
@@ -758,7 +803,8 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
  real                :: pres_numerator,pres_denominator,mui,U1i,E1i,Tgas,dUcomb,dEcomb
  real                :: residualE,residualU,maxerrU2old,Tgas4,Trad4,ck,ack
  real                :: Ei,Ui,cvi,opacityi,eddi
- real                :: maxerrE2i,maxerrU2i
+ real                :: maxerrE2i,maxerrU2i,dUi
+ real, parameter     :: max_contraction = 0.94
 
  a_code = get_radconst_code()
  c_code = get_c_code()
@@ -767,6 +813,7 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
  moresweep = .false.
  maxerrE2 = 0.
  maxerrU2 = 0.
+ damp_oscillations = .false.
  !$omp end single
 
  !$omp do schedule(dynamic,nchunk)&
@@ -776,8 +823,8 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
  !$omp private(cooling_line,photoelectric,h2form,dust_heating,dust_term,betaval,chival,gammaval,betaval_d,tfour) &
  !$omp private(e_planetesimali,u4term,u1term,u0term,pcoleni,pres_numerator,pres_denominator,moresweep2,mui,ierr) &
  !$omp private(residualE,residualU,maxerrU2old,gas_temp,ieqtype,unit_density,Tgas4,Trad4,ck,ack) &
- !$omp private(maxerrE2i,maxerrU2i) &
- !$omp reduction(max:maxerrE2,maxerrU2)
+ !$omp private(maxerrE2i,maxerrU2i,dUi) &
+ !$omp reduction(max:maxerrE2,maxerrU2) reduction(.or.:damp_oscillations)
  main_loop: do n = 1,ncompactlocal
     i = ivar(3,n)
 
@@ -883,6 +930,8 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
        Tgas4 = Tgas**4
        Trad4 = rhoi*Ei/a_code
        ck  = c_code*opacityi
+       ! Disable matter-radiation exchange without changing the diffusion opacity.
+       if (.not.exchange_radiation_energy) ck = 0.
        ack = a_code*ck
 
        betaval  = ck*rhoi*dti
@@ -913,6 +962,13 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
           cycle main_loop
        endif
 
+       if (.not.skip_quartic .and. u4term==0.) then
+          ! Without exchange the gas equation is linear; normalising the
+          ! quartic by u4term would divide by zero.
+          U1i = -u0term/u1term
+          U1i = (1.-omega)*EU0(2,i) + omega*U1i
+          skip_quartic = .true.
+       endif
        if (.not. skip_quartic) then
           u1term = u1term/u4term
           u0term = u0term/u4term
@@ -1005,6 +1061,15 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
           residualU = origEU(2,i)+(dUcomb)*dti - U1i
        endif
        maxerrU2 = max(maxerrU2, maxerrU2i)
+       ! Require three slow sign reversals of an unconverged gas update.
+       dUi = (U1i-Ui)/U1i
+       if (abs(dUi) > tol_rad .and. dUi*dUlast(i) < 0. .and. abs(dUi) >= max_contraction*abs(dUlast(i))) then
+          nslow(i) = nslow(i) + 1
+       else
+          nslow(i) = 0
+       endif
+       damp_oscillations = damp_oscillations .or. nslow(i) >= 3
+       dUlast(i) = dUi
        !
        ! Record convergence of individual particles
        !
@@ -1019,7 +1084,11 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
        if (.not. iamtype(iphase(i))==iboundary) then
           EU0(1,i) = E1i
           EU0(2,i) = U1i
-          EU0(3,i) = get_cv(cv_type,rhoi,U1i)
+          if (cv_type==20) then
+             EU0(3,i) = get_cv_particle(i,rhoi,U1i,temperature_guess=Ui/cvi)
+          else
+             EU0(3,i) = get_cv_particle(i,rhoi,U1i)
+          endif
           EU0(4,i) = get_kappa(iopacity_type,U1i,EU0(3,i),rhoi)
        endif
 
@@ -1115,14 +1184,14 @@ subroutine set_heating_cooling_low_rhoT(i,eradi,ugasi,orig_eradi,orig_ugasi,cvi,
  if (.true.) then
     try_loop: do itry = 1,2
        u_found = ugasi  ! ugasi = EU0(2,i)
-       t_found = ugasi/get_cv(cv_type,rhoi,u_found)
+       t_found = ugasi/get_cv_particle(i,rhoi,u_found,temperature_guess=gas_temp)
        t_orig = t_found
        do iterationloop = 1,100
           u_last = u_found
           t_last = t_found
 
           u_found = get_u_from_rhoT(rhoi,t_found,ieos)
-          cv1 = get_cv(cv_type,rhoi,u_found)
+          cv1 = get_cv_particle(i,rhoi,u_found,temperature_guess=t_last)
           t_found = u_found/cv1
           !
           !--For calculating numerical derivative with gas temperature,

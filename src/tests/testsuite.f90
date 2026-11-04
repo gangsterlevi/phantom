@@ -58,7 +58,7 @@ subroutine testsuite(string,first,last,ntests,npass,nfail)
  use testsetdisc,  only:test_setdisc
  use testsetstar,  only:test_setstar
  use testsethier,  only:test_sethier
- use testeos,      only:test_eos
+ use testeos,      only:test_eos,test_eos_gasradrec
  use testcooling,  only:test_cooling
  use testgeometry, only:test_geometry
  use testwind,     only:test_wind
@@ -81,7 +81,7 @@ subroutine testsuite(string,first,last,ntests,npass,nfail)
  integer,          intent(inout) :: ntests,npass,nfail
  logical :: testall,doneigh,dokdtree,doderivs,dokernel,dostep,dorwdump,docoala
  logical :: doptmass,dognewton,dosedov,doexternf,doindtstep,dogravity,dogeom
- logical :: dosetdisc,dosetstar,doeos,docooling,dodust,donimhd,docorotate,doany,dogrowth
+ logical :: dosetdisc,dosetstar,doeos,doeosgasradrec,docooling,dodust,donimhd,docorotate,doany,dogrowth
  logical :: dogr,doradiation,dopart,dopoly,dompi,dohier,dodamp,dowind
  logical :: doiorig,doapr,dounits,dolum,dosinktree,doorbits,dolinalg,dodivb,doinfile
  real(kind=4) :: twall1,tcpu1,twall2,tcpu2
@@ -123,6 +123,7 @@ subroutine testsuite(string,first,last,ntests,npass,nfail)
  dosetdisc   = .false.
  dosetstar   = .false.
  doeos       = .false.
+ doeosgasradrec = .false.
  dodust      = .false.
  dogrowth    = .false.
  donimhd     = .false.
@@ -210,6 +211,9 @@ subroutine testsuite(string,first,last,ntests,npass,nfail)
     dosetstar = .true.
  case('eos')
     doeos = .true.
+ case('eosgasradrec')
+    doeosgasradrec = .true.
+    doradiation = .false.
  case('dust')
     dodust = .true.
  case('gr')
@@ -284,6 +288,9 @@ subroutine testsuite(string,first,last,ntests,npass,nfail)
  if (doeos.or.testall) then
     call test_eos(ntests,npass)
     call set_default_options_testsuite(iverbose) ! restore defaults
+ elseif (doeosgasradrec) then
+    call test_eos_gasradrec(ntests,npass)
+    call set_default_options_testsuite(iverbose)
  endif
 !
 !--test of equation of state module

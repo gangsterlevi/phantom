@@ -114,6 +114,75 @@ have a look at the outputs with splash
    splash sim_0*
 
 
+Circular binaries from Roche-lobe overflow
+------------------------------------------
+
+For ``binary`` and ``radbinary`` setups, select ``itype=5`` to derive
+an initially circular orbit from the desired overflow of star 1. This mode
+requires exactly two bodies and a gas-particle donor (``iprofile1 > 0``).
+Star 2 uses the usual setup options and may be another resolved star or a
+sink particle. For example, keep your existing MESA options for star 1 and
+add a five-solar-mass sink companion::
+
+    nstars = 2
+    iprofile2 = 0
+    Mstar2 = 5 msun
+    hacc2 = 0
+    hsoft2 = 1 rsun
+    itype = 5
+    roche_overflow1 = 10
+    corotate = T
+    gwinspiral = F
+    norbits = 10
+    deltat = 0.1
+
+After changing ``nstars``, run ``phantomsetup`` to generate any missing
+companion options, edit them, and rerun. Selecting ``itype=5`` also generates
+``roche_overflow1`` when it is missing, with a default of zero (contact), and
+includes Roche circular orbits in the printed ``itype`` menu. Existing
+``roche_circular=T`` files are rewritten to use ``itype=5``.
+
+For this mode, every setup run sets ``tmax = norbits * P`` and
+``dtmax = deltat * P`` in the generated ``.in`` file, using the newly derived
+orbital period ``P``, even if the ``.in`` file already exists. With the
+settings above, the simulation lasts ten initial orbital periods and writes
+a snapshot every tenth of an orbit (100 dump intervals in total). Set
+``deltat=0.01`` for 100 snapshots per orbit if finer output is needed.
+The period and both run-time settings are also printed to the console.
+
+The separation is calculated after
+both stars and any hydrodynamic/radiative relaxation have been constructed.
+Each body is centred with its sink core and its bulk velocity removed.
+``R1`` is the distance from star 1's centre of mass to its outermost live gas
+particle centre, before orbital placement. It does not include smoothing
+lengths, and it is not the radius of the original MESA profile. The measured
+radius and the derived orbital parameters are printed for inspection.
+
+The overflow percentage is defined by ``R1/RL1 = 1 + roche_overflow1/100``:
+zero gives Roche-lobe contact and 10 means the donor radius is 110 per cent
+of its Roche-lobe radius. It is a radius percentage, rather than an overflowing
+mass fraction. Using the Eggleton approximation with ``q=M1/M2``, setup solves
+
+.. math::
+
+    R_{L,1}=a\frac{0.49q^{2/3}}{0.6q^{2/3}+\ln(1+q^{1/3})},
+    \qquad
+    a=\frac{R_1}{(1+\mathrm{roche\_overflow1}/100)(R_{L,1}/a)}.
+
+The orbital masses are the represented particle masses, including each
+star's sink core, accounting for rounding the companion's particle count.
+Existing binary routines supply
+circular velocities about the common centre of mass and the orbital period.
+``corotate=T`` additionally gives resolved stars synchronous spin. The setup
+places the initially spherical stars into this orbit; it does not relax their
+shapes in the binary tidal potential. The Eggleton radius is a volume-equivalent
+Roche-lobe approximation.
+
+For ``itype=5``, ``a``, ``e`` and the other orbital-element inputs are not
+required; the orbit uses the default orientation in the xy plane.
+Choose another ``itype`` to use the existing orbital inputs: ``itype=0`` and
+``e=0`` specify a circular orbit with a manually chosen separation.
+
 Two polytropes in orbit
 ------------------------
 The default is to setup two polytropes and place them in orbit.

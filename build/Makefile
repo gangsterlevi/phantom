@@ -50,7 +50,7 @@ endif
 ifndef EDITOR
     EDITOR= emacs
 endif
-ifndef OPENMP
+ifndef
     OPENMP= yes
 endif
 ifndef SPLASH_DIR
@@ -68,6 +68,16 @@ LIBCXX = -lstdc++
 #FPPFLAGS=
 LDFLAGS=
 LIBTOOL=ar rcs
+
+# Heian configuration
+ifeq ($(SYSTEM),heian)
+    include Makefile_defaults_ifx
+    QSYS = slurm
+    KNOWN_SYSTEM=yes
+ifeq ($(MPI),heian)
+    USEMPI=yes
+    endif
+endif
 
 #----------------------------------------------------------------
 # here follows specific configuration options used

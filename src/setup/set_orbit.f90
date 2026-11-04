@@ -12,7 +12,10 @@ module setorbit
 ! The current options are:
 !   0) Campbell elements for bound or unbound orbit (aeiOwf)
 !   1) Flyby parameters (periapsis, initial separation, i0we)
-!   2) position and velocity for both bodies
+!   2) Orbit Reconstructor
+!   3) relative position and velocity
+!   4) position and velocity for both bodies
+!   5) circular Roche-lobe overflow orbit (two-star setup only)
 !
 ! :References: None
 !
@@ -26,10 +29,12 @@ module setorbit
  public :: set_orbit
  public :: set_defaults_orbit,write_options_orbit,read_options_orbit,get_orbital_time
  public :: orbit_t,write_trajectory_to_file,set_orbit_elements
+ public :: set_roche_lobe_orbit
 !
  ! define data types with options needed
  ! to setup an orbit
  !
+ integer, parameter, public :: iorbit_roche = 5
  integer, parameter :: len_str = 20
 
  type campbell_elems
@@ -65,6 +70,7 @@ module setorbit
     type(obs_elems)      :: obs
     type(posvel_elems)   :: posvel
     real :: period
+    real :: roche_overflow,roche_radius ! percentage and measured donor radius for itype=5
  end type orbit_t
 
  private
@@ -80,6 +86,8 @@ subroutine set_defaults_orbit(orbit)
  type(orbit_t), intent(out) :: orbit
 
  orbit%input_type = 0
+ orbit%roche_overflow = 0.
+ orbit%roche_radius = 0.
  orbit%elems%a = '10.'
  orbit%a = 10.0
  orbit%e = 0.0
@@ -111,6 +119,35 @@ subroutine set_defaults_orbit(orbit)
 end subroutine set_defaults_orbit
 
 !----------------------------------------------------------------
+! Set a circular orbit whose volume-equivalent Roche lobe is smaller
+! than the supplied donor radius by the requested overflow percentage:
+! R1/RL1 = 1 + overflow/100. Masses and radius are in code units.
+!----------------------------------------------------------------
+subroutine set_roche_lobe_orbit(orbit,m1,m2,r1,overflow,ierr)
+ use orbits, only:Rochelobe_estimate
+ use, intrinsic :: ieee_arithmetic, only:ieee_is_finite
+ type(orbit_t), intent(inout) :: orbit
+ real, intent(in) :: m1,m2,r1,overflow
+ integer, intent(out) :: ierr
+ real :: rl_fraction
+
+ ierr = 1
+ if (.not.all(ieee_is_finite([m1,m2,r1,overflow]))) return
+ if (m1 <= 0. .or. m2 <= 0. .or. r1 <= 0. .or. overflow < 0.) return
+ ! Rochelobe_estimate returns the lobe of its SECOND mass argument.
+ rl_fraction = Rochelobe_estimate(m2,m1,1.)
+ call set_defaults_orbit(orbit)
+ orbit%input_type = iorbit_roche
+ orbit%roche_radius = r1
+ orbit%roche_overflow = overflow
+ orbit%a = (r1/(1.+overflow/100.))/rl_fraction
+ orbit%e = 0.
+ write(orbit%elems%a,'(es20.12)') orbit%a
+ ierr = 0
+
+end subroutine set_roche_lobe_orbit
+
+!----------------------------------------------------------------
 !+
 !  setup for two body orbit
 !+
@@ -130,6 +167,11 @@ subroutine set_orbit(orbit,m1,m2,hacc1,hacc2,xyzmh_ptmass,vxyz_ptmass,nptmass,ve
  integer :: i
 
  ierr = 0
+ if (orbit%input_type==iorbit_roche .and. orbit%roche_radius <= 0.) then
+    print "(a)",' ERROR: set_orbit: itype=5 requires a measured donor radius from the two-star setup'
+    ierr = 1
+    return
+ endif
  select case(orbit%input_type)
  case(4)
     !
@@ -187,7 +229,7 @@ subroutine set_orbit_elements(orbit,m1,m2,verbose,nerr)
  use units,   only:in_code_units,is_time_unit,utime
  use orbits,  only:get_semimajor_axis,convert_flyby_to_elements,get_orbital_elements,&
                    get_pericentre_distance,get_true_anomaly_from_separation,rad_to_deg,&
-                   get_time_to_separation,get_time_between_true_anomalies
+                   get_time_to_separation,get_time_between_true_anomalies,Rochelobe_estimate
  type(orbit_t), intent(inout) :: orbit
  real,          intent(in)    :: m1,m2
  logical,       intent(in),    optional :: verbose
@@ -203,6 +245,15 @@ subroutine set_orbit_elements(orbit,m1,m2,verbose,nerr)
 
  mu = m1+m2
  select case(orbit%input_type)
+ case(iorbit_roche)
+    ! Input parsing defers this until the relaxed donor radius is available.
+    if (orbit%roche_radius <= 0. .or. m1 <= 0. .or. m2 <= 0.) then
+       print "(a)",' ERROR: set_orbit_elements: Roche orbit needs positive masses and a measured donor radius'
+       if (present(nerr)) nerr = nerr+1
+       return
+    endif
+    orbit%a = (orbit%roche_radius/(1.+orbit%roche_overflow/100.))/Rochelobe_estimate(m2,m1,1.)
+    orbit%e = 0.
  case(4)
     ! convert input strings to code units
     do i=1,3
@@ -441,17 +492,21 @@ end function sep_in_range
 !  write options to .setup file
 !+
 !----------------------------------------------------------------
-subroutine write_options_orbit(orbit,iunit,label,prefix,comment_prefix,input_type)
+subroutine write_options_orbit(orbit,iunit,label,prefix,comment_prefix,input_type,allow_roche)
  use infile_utils, only:write_inopt
  type(orbit_t),    intent(in) :: orbit
  integer,          intent(in) :: iunit
  character(len=*), intent(in), optional :: label,prefix,comment_prefix
  integer,          intent(in), optional :: input_type
+ logical,          intent(in), optional :: allow_roche
  character(len=10) :: c,p
  character(len=20) :: cp
  integer :: itype
+ logical :: show_roche
 
  ! append optional label e.g. '1', '2' or prefix e.g. 'binary' and comment prefix e.g. 'outer binary:'
+ show_roche = .false.
+ if (present(allow_roche)) show_roche = allow_roche
  c = ''; p = ''; cp = ''
  if (present(label)) c = trim(adjustl(label))
  if (present(prefix)) p = '_'//trim(adjustl(prefix))
@@ -460,14 +515,22 @@ subroutine write_options_orbit(orbit,iunit,label,prefix,comment_prefix,input_typ
  write(iunit,"(/,a)") '# orbit '//trim(c)
  if (.not.present(input_type)) then
     itype = orbit%input_type
-    call write_inopt(orbit%input_type,'itype'//trim(p)//trim(c),&
-         'orbital elements (0=aeiOwf,1=flyby,2=Orbit Reconstructor,3=dx,dv,4=x,v)',iunit)
+    if (show_roche) then
+       call write_inopt(orbit%input_type,'itype'//trim(p)//trim(c), &
+            'orbit (0=aeiOwf,1=flyby,2=reconstruct,3=dx/dv,4=x/v,5=Roche circular)',iunit)
+    else
+       call write_inopt(orbit%input_type,'itype'//trim(p)//trim(c), &
+            'orbital elements (0=aeiOwf,1=flyby,2=Orbit Reconstructor,3=dx,dv,4=x,v)',iunit)
+    endif
  else
     itype = input_type
  endif
  if (present(prefix)) p = trim(adjustl(prefix))//'_'
 
  select case(itype)
+ case(iorbit_roche)
+    call write_inopt(orbit%roche_overflow,'roche_overflow1', &
+         '100*(R1/RL1-1) in percent; 0=contact, 10=R1 is 1.10 RL1',iunit)
  case(4)
     call write_inopt(orbit%posvel%x1(1),trim(p)//'x1'//trim(c),trim(cp)//'x position body 1 (code units or e.g. 1 au)',iunit)
     call write_inopt(orbit%posvel%x1(2),trim(p)//'y1'//trim(c),trim(cp)//'y position body 1 (code units or e.g. 1 au)',iunit)
@@ -520,7 +583,7 @@ end subroutine write_options_orbit
 !  read options from .setup file
 !+
 !----------------------------------------------------------------
-subroutine read_options_orbit(orbit,m1,m2,db,nerr,label,prefix,input_type)
+subroutine read_options_orbit(orbit,m1,m2,db,nerr,label,prefix,input_type,allow_roche)
  use infile_utils, only:inopts,read_inopt
  type(orbit_t),             intent(out)   :: orbit
  real,                      intent(in)    :: m1,m2
@@ -528,10 +591,17 @@ subroutine read_options_orbit(orbit,m1,m2,db,nerr,label,prefix,input_type)
  integer,                   intent(inout) :: nerr
  character(len=*),          intent(in), optional :: label,prefix
  integer,                   intent(in), optional :: input_type
+ logical,                   intent(in), optional :: allow_roche
  character(len=10) :: c,p
  real :: sep,rp,ra
+ integer :: max_type
+ logical :: accept_roche
 
  ! append optional label e.g. '1', '2' or prefix e.g. 'binary' and comment prefix e.g. 'outer binary:'
+ accept_roche = .false.
+ if (present(allow_roche)) accept_roche = allow_roche
+ max_type = 4
+ if (accept_roche) max_type = iorbit_roche
  c = ''; p = ''
  if (present(label)) c = trim(adjustl(label))
  if (present(prefix)) p = '_'//trim(adjustl(prefix))
@@ -542,11 +612,20 @@ subroutine read_options_orbit(orbit,m1,m2,db,nerr,label,prefix,input_type)
  if (present(input_type)) then
     orbit%input_type = input_type
  else
-    call read_inopt(orbit%input_type,'itype'//trim(p)//trim(c),db,errcount=nerr,min=0,max=4)
+    call read_inopt(orbit%input_type,'itype'//trim(p)//trim(c),db,errcount=nerr,min=0,max=max_type)
  endif
  if (present(prefix)) p = trim(adjustl(prefix))//'_'
 
  select case(orbit%input_type)
+ case(iorbit_roche)
+    if (.not.accept_roche) then
+       print "(a)",' ERROR: itype=5 is supported only by the two-star binary setup'
+       nerr = nerr+1
+       return
+    endif
+    call read_inopt(orbit%roche_overflow,'roche_overflow1',db,errcount=nerr,min=0.)
+    ! The radius and represented masses are measured after stellar relaxation.
+    return
  case(4)
     call read_inopt(orbit%posvel%x1(1),trim(p)//'x1'//trim(c),db,errcount=nerr)
     call read_inopt(orbit%posvel%x1(2),trim(p)//'y1'//trim(c),db,errcount=nerr)

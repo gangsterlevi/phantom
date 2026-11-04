@@ -101,6 +101,9 @@ A non-exhaustive list of possible arguments are as follows:
 | kernel                            | performs unit tests of the kernel |
 |                                   | module                            |
 +-----------------------------------+-----------------------------------+
+| eosgasradrec                       | tests gas, radiation and          |
+|                                   | recombination EOS inversions      |
++-----------------------------------+-----------------------------------+
 
 The buildbot
 ~~~~~~~~~~~~

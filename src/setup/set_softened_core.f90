@@ -31,7 +31,8 @@ contains
 !+
 !-----------------------------------------------------------------------
 subroutine set_softened_core(eos_type,isoftcore,isofteningopt,regrid_core,rcore,mcore,r,den,pres,m,X,Y,ierr)
- use eos,                 only:X_in,Z_in,init_eos,gmw,get_mean_molecular_weight
+ use eos,                 only:X_in,Z_in,init_eos,gmw,get_mean_molecular_weight,ieos
+ use dim,                 only:do_radiation
  use eos_mesa,            only:init_eos_mesa
  use io,                  only:fatal
  use table_utils,         only:interpolator,yinterp,flip_array
@@ -43,7 +44,7 @@ subroutine set_softened_core(eos_type,isoftcore,isofteningopt,regrid_core,rcore,
  logical,           intent(in)    :: regrid_core
  real,              intent(inout) :: rcore,mcore
  real, allocatable, intent(inout) :: r(:),den(:),m(:),pres(:),X(:),Y(:)
- integer             :: core_index,ierr,npts,Ncore
+ integer             :: core_index,ierr,npts,Ncore,eos_init
  real                :: Xcore,Zcore,rc
  logical             :: isort_decreasing,iexclude_core_mass
  real, allocatable   :: r1(:),den1(:),pres1(:),m1(:),X1(:),Y1(:)
@@ -89,7 +90,13 @@ subroutine set_softened_core(eos_type,isoftcore,isofteningopt,regrid_core,rcore,
     Z_in = Zcore
     if (ierr /= 0) call fatal('set_softened_core','could not initialise equation of state')
  endif
- call init_eos(eos_type,ierr)  ! need to initialise EoS again with newfound composition (also needed for iopacity_type = 1)
+ ! eos_type=12 is used to construct total-pressure profiles in radiation
+ ! builds, not to evolve the gas. Initialise the actual evolution EoS so
+ ! radiation compatibility and opacity initialisation use the right type.
+ eos_init = eos_type
+ if (do_radiation) eos_init = ieos
+ call init_eos(eos_init,ierr)
+ if (ierr /= 0) call fatal('set_softened_core','could not initialise equation of state')
 
  if (regrid_core) then
     ! make copy of original arrays

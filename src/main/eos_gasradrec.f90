@@ -16,14 +16,16 @@ module eos_gasradrec
 ! :Runtime parameters:
 !   - irecomb : *recombination energy to include. 0=H2+H+He, 1=H+He, 2=He, 3=none*
 !
-! :Dependencies: infile_utils, io, ionization_mod, physcon
+! :Dependencies: infile_utils, io, ionization_mod, mpiutils, physcon
 !
  implicit none
  integer, public :: irecomb = 0 ! types of recombination energy to include for ieos=20
  public :: equationofstate_gasradrec,calc_uT_from_rhoP_gasradrec,calc_uP_from_rhoT_gasradrec,&
-           read_options_eos_gasradrec,write_options_eos_gasradrec,eos_info_gasradrec,init_eos_gasradrec
+           read_options_eos_gasradrec,write_options_eos_gasradrec,eos_info_gasradrec,init_eos_gasradrec,&
+           report_newton_stalls,reset_newton_stalls,get_temperature_gasradrec
  private
- real, parameter :: eoserr=2.e-15, W4err=1.e-2
+ real, parameter :: eoserr=1.e-15,W4err=1.e-2
+ integer :: nstall_newton = 0,nfallback_quad = 0
 
 contains
 !-----------------------------------------------------------------------
@@ -36,50 +38,109 @@ contains
 subroutine equationofstate_gasradrec(d,eint,T,imu,X,Y,p,cf,gamma_eff,cveff_out,do_radiation,xi)
  use ionization_mod, only:get_erec_cveff,get_imurec
  use physcon,        only:radconst,Rg
- use io,             only:fatal,warning
  real,    intent(in)    :: d,eint,X,Y
  real,    intent(inout) :: T,imu ! imu is 1/mu, an output
  real,    intent(out)   :: p,cf,gamma_eff
  real,    intent(in),  optional :: xi
  logical, intent(in),  optional :: do_radiation
  real,    intent(out), optional :: cveff_out
- real                :: corr,erec,derecdT,Tdot,logd,dt,Tguess,cveff,dcveffdlnT,cs2
- real                :: T_prev,T_prev2
+ real                :: erec,derecdT,logd,cveff,dcveffdlnT,cs2
  logical             :: do_radiation_local
- logical             :: use_quad,converged
- integer, parameter  :: nmax = 500
- integer n,ipass
+ logical             :: use_quad
+
+ if (.not.present(do_radiation)) then
+    do_radiation_local = .false.
+ else
+    do_radiation_local = do_radiation
+ endif
+ call get_temperature_gasradrec(d,eint,T,X,Y,do_radiation_local,use_quad)
+ logd=log10(d)
+ call get_erec_cveff(logd,T,X,Y,erec,cveff,derecdT,dcveffdlnT,use_quad=use_quad)
+ call get_imurec(logd,T,X,Y,imu,use_quad=use_quad)
+ if (do_radiation_local) then
+    p = Rg*imu*d*T
+ else
+    p = ( Rg*imu*d + radconst*T**3/3. )*T
+ endif
+ if (present(xi)) then
+    cs2 = get_cs2(d,T,X,Y,do_radiation_local,xi,use_quad=use_quad)  ! not used at the moment
+ else
+    cs2 = get_cs2(d,T,X,Y,do_radiation_local,use_quad=use_quad)
+ endif
+ gamma_eff=cs2*d/p
+ cf = sqrt(cs2)
+ if (present(cveff_out)) cveff_out = cveff
+
+end subroutine equationofstate_gasradrec
+
+!-----------------------------------------------------------------------
+!+
+!  Shared temperature inversion. Radiation's u/T conversion does not need
+!  pressure, molecular weight or sound speed after this solve.
+!+
+!-----------------------------------------------------------------------
+subroutine get_temperature_gasradrec(d,eint,T,X,Y,do_radiation,use_quad_out)
+ use ionization_mod, only:get_erec_cveff
+ use physcon, only:radconst,Rg
+ use io, only:fatal
+ use, intrinsic :: ieee_arithmetic, only:ieee_is_finite
+ real, intent(in) :: d,eint,X,Y
+ real, intent(inout) :: T
+ logical, intent(in), optional :: do_radiation
+ logical, intent(out), optional :: use_quad_out
+ real :: corr,erec,derecdT,Tdot,logd,dt,Tguess,cveff,dcveffdlnT
+ real :: state(3),state_prev(3),state_prev2(3),residual,residual_prev
+ logical :: do_radiation_local,use_quad,converged
+ integer, parameter :: nmax=500
+ integer :: n,ipass
 
  if (.not. present(do_radiation)) then
     do_radiation_local = .false.
  else
     do_radiation_local = do_radiation
  endif
- corr=huge(0.); Tdot=0.; logd=log10(d); dt=0.9; Tguess=T
+ if (.not.ieee_is_finite(d).or..not.ieee_is_finite(eint)) &
+    call fatal('eos_gasradrec','Nonfinite density or energy in temperature solve')
+ if (d <= 0. .or. eint <= 0.) call fatal('eos_gasradrec','Nonpositive density or energy in temperature solve')
+ Tguess=T
+ corr=huge(0.); Tdot=0.; logd=log10(d); dt=0.9
  converged = .false.
  use_quad = .false.
- precision_passes: do ipass = 1,2
-    if (ipass == 2) then
-       use_quad = .true.
-       call warning('eos_gasradrec','Newton solver stalled; retrying ionization fit in quad precision')
-       Tdot = 0.
-       dt = 0.9
+ ! Tiers 1 and 2: retain the inexpensive Newton solve, retrying only
+ ! the ionization fit in quad precision if the first pass stalls.
+ precision_passes: do ipass=1,2
+    use_quad = ipass==2
+    if (use_quad) then
+       !$omp atomic update
+       nstall_newton = nstall_newton + 1
     endif
-    T_prev = huge(0.); T_prev2 = huge(0.)
+    Tdot = 0.
+    dt = 0.9
+    residual_prev = huge(0.)
+    state_prev = huge(0.); state_prev2 = huge(0.)
     do n = 1,nmax
-       if (.not.use_quad .and. n > 2 .and. (T == T_prev .or. T == T_prev2)) exit
-       T_prev2 = T_prev
-       T_prev = T
+       if (.not.ieee_is_finite(T)) exit
+       if (T <= 0.) exit
+       state = [T,Tdot,dt]
+       if (.not.use_quad .and. n > 2 .and. (T==state_prev(1) .or. T==state_prev2(1))) exit
+       ! An exact fixed point or two-cycle of the complete iteration state
+       ! cannot escape once the last scheduled damping change has passed.
+       ! Escalate immediately; convergence still requires the usual checks.
+       if (use_quad .and. n>101) then
+          if (all(state==state_prev) .or. all(state==state_prev2)) exit
+       endif
+       state_prev2 = state_prev
+       state_prev = state
        call get_erec_cveff(logd,T,X,Y,erec,cveff,derecdT,dcveffdlnT,use_quad=use_quad)
        if (d*erec>=eint) then ! avoid negative thermal energy
-          T = 0.9*T; Tdot=0.;cycle
+          T = 0.9*T; Tdot=0.; residual_prev=huge(0.); cycle
        endif
        if (do_radiation_local) then
-          corr = (eint-d*(Rg*cveff*T+erec)) &
-                 / ( -d*(Rg*(cveff+dcveffdlnT)+derecdT) )
+          residual = eint-d*(Rg*cveff*T+erec)
+          corr = residual / ( -d*(Rg*(cveff+dcveffdlnT)+derecdT) )
        else
-          corr = (eint-(radconst*T**3+Rg*d*cveff)*T-d*erec) &
-                 / ( -4.*radconst*T**3-d*(Rg*(cveff+dcveffdlnT)+derecdT) )
+          residual = eint-(radconst*T**3+Rg*d*cveff)*T-d*erec
+          corr = residual / ( -4.*radconst*T**3-d*(Rg*(cveff+dcveffdlnT)+derecdT) )
        endif
        if (-corr > 10.*T) then  ! do not let temperature guess increase by more than a factor of 1000
           T = 10.*T
@@ -96,33 +157,35 @@ subroutine equationofstate_gasradrec(d,eint,T,imu,X,Y,p,cf,gamma_eff,cveff_out,d
           converged = .true.
           exit
        endif
+       ! Double precision has stopped improving in the local Newton
+       ! regime. Retry ionization in quad now, instead of waiting for the
+       ! iteration limit or a damping change. sqrt(epsilon) selects when
+       ! to retry; the convergence tolerance above remains eoserr.
+       if (.not.use_quad) then
+          if (abs(corr)<=sqrt(epsilon(T))*T .and. abs(residual)>=residual_prev) exit
+          residual_prev = abs(residual)
+       endif
        if (n>50) dt=0.5
        if (n>100) dt=0.25
     enddo
     if (converged) exit precision_passes
  enddo precision_passes
- call get_erec_cveff(logd,T,X,Y,erec,cveff,derecdT,dcveffdlnT,use_quad=use_quad)
- call get_imurec(logd,T,X,Y,imu,use_quad=use_quad)
+ ! Tier 3: certify the rounded temperature using the full quad bracket.
  if (.not.converged) then
-    print*,'d=',d,'eint=',eint/d,'Tguess=',Tguess,'mu=',1./imu,'T=',T,'erec=',erec
+    use_quad = .true.
+    !$omp atomic update
+    nfallback_quad = nfallback_quad + 1
+    call solve_temperature_quad(d,eint,T,X,Y,do_radiation_local,.false.,converged,corr)
+ endif
+ if (.not.converged) then
+    print*,'d=',d,'eint=',eint/d,'Tguess=',Tguess,'T=',T
+    print*,'X=',X,'Y=',Y,'do_radiation=',do_radiation_local
     print*,'n = ',n,' nmax = ',nmax,' correction is ',abs(corr),' needs to be < ',eoserr*T
     call fatal('eos_gasradrec','Failed to converge on temperature in equationofstate_gasradrec')
  endif
- if (do_radiation_local) then
-    p = Rg*imu*d*T
- else
-    p = ( Rg*imu*d + radconst*T**3/3. )*T
- endif
- if (present(xi)) then
-    cs2 = get_cs2(d,T,X,Y,do_radiation_local,xi,use_quad=use_quad)  ! not used at the moment
- else
-    cs2 = get_cs2(d,T,X,Y,do_radiation_local,use_quad=use_quad)
- endif
- gamma_eff=cs2*d/p
- cf = sqrt(cs2)
- if (present(cveff_out)) cveff_out = cveff
+ if (present(use_quad_out)) use_quad_out=use_quad
 
-end subroutine equationofstate_gasradrec
+end subroutine get_temperature_gasradrec
 
 !-----------------------------------------------------------------------
 !+
@@ -211,15 +274,18 @@ end subroutine calc_uP_from_rhoT_gasradrec
 subroutine calc_uT_from_rhoP_gasradrec(rhoi,presi,X,Y,T,u,mui,ierr,do_radiation)
  use ionization_mod, only:get_imurec
  use physcon,        only: radconst,Rg
+ use io,             only:warning
+ use, intrinsic :: ieee_arithmetic, only:ieee_is_finite
  real,    intent(in)    :: rhoi,presi,X,Y
  real,    intent(inout) :: T
  real,    intent(out)   :: u
  integer, intent(out)   :: ierr
  logical, intent(in),  optional :: do_radiation
  real,    intent(out), optional :: mui
- integer                       :: n
+ integer                       :: n,ipass
  real                          :: logrhoi,imu,dimurecdlnT,dT,Tdot,corr,p1
- logical                       :: do_radiation_local
+ real                          :: state(3),state_prev(3),state_prev2(3),residual,residual_prev
+ logical                       :: do_radiation_local,use_quad,converged
  integer, parameter            :: nmax = 500
 
  if (.not. present(do_radiation)) then
@@ -228,41 +294,269 @@ subroutine calc_uT_from_rhoP_gasradrec(rhoi,presi,X,Y,T,u,mui,ierr,do_radiation)
     do_radiation_local = do_radiation
  endif
 
- if (T <= 0.) T = min((3.*presi/radconst)**0.25, presi/(rhoi*Rg))  ! initial guess for temperature
- ierr = 0
+ ierr = 1
+ if (.not.ieee_is_finite(rhoi).or..not.ieee_is_finite(presi)) return
+ if (rhoi <= 0. .or. presi <= 0.) return
+ if (ieee_is_finite(T)) then
+    if (T <= 0.) T = min((3.*presi/radconst)**0.25, presi/(rhoi*Rg))  ! initial guess for temperature
+ endif
  corr = huge(0.)
- Tdot = 0.
- dT = 0.9
  logrhoi = log10(rhoi)
- do n = 1,nmax
-    call get_imurec(logrhoi,T,X,Y,imu,dimurecdlnT)
-    if (do_radiation_local) then
-       corr = ( presi - rhoi*Rg*imu*T ) / &
-              ( -rhoi*Rg * ( imu + dimurecdlnT ) )
-    else
-       corr = ( presi - (rhoi*Rg*imu + radconst*T**3/3.)*T ) / &
-              ( -rhoi*Rg * ( imu + dimurecdlnT ) - 4.*radconst*T**3/3. )
+ converged = .false.
+ use_quad = .false.
+ ! Tiers 1 and 2: retain the inexpensive Newton solve, retrying only
+ ! the ionization fit in quad precision if the first pass stalls.
+ precision_passes: do ipass=1,2
+    use_quad = ipass==2
+    if (use_quad) then
+       !$omp atomic update
+       nstall_newton = nstall_newton + 1
     endif
-    if (abs(corr)>W4err*T) then
-       T = T + Tdot*dT
-       Tdot = (1.-2.*dT)*Tdot - dT*corr
-    else
-       T = T - corr
-       Tdot = 0.
-    endif
-    if (abs(corr) < eoserr*T) exit
-    if (n > 50) dT = 0.5
- enddo
- if (n > nmax) then
+    Tdot = 0.
+    dT = 0.9
+    residual_prev = huge(0.)
+    state_prev = huge(0.)
+    state_prev2 = huge(0.)
+    do n = 1,nmax
+       if (.not.ieee_is_finite(T)) exit
+       if (T <= 0.) exit
+       state = [T,Tdot,dT]
+       if (.not.use_quad .and. n > 2 .and. (T==state_prev(1) .or. T==state_prev2(1))) exit
+       ! An exact fixed point or two-cycle of the complete iteration state
+       ! cannot escape once the last scheduled damping change has passed.
+       ! Escalate immediately; convergence still requires the usual checks.
+       if (use_quad .and. n>51) then
+          if (all(state==state_prev) .or. all(state==state_prev2)) exit
+       endif
+       state_prev2 = state_prev
+       state_prev = state
+       call get_imurec(logrhoi,T,X,Y,imu,dimurecdlnT,use_quad=use_quad)
+       if (do_radiation_local) then
+          residual = presi-rhoi*Rg*imu*T
+          corr = residual / ( -rhoi*Rg * ( imu + dimurecdlnT ) )
+       else
+          residual = presi-(rhoi*Rg*imu + radconst*T**3/3.)*T
+          corr = residual / ( -rhoi*Rg * ( imu + dimurecdlnT ) - 4.*radconst*T**3/3. )
+       endif
+       if (abs(corr)>W4err*T) then
+          T = T + Tdot*dT
+          Tdot = (1.-2.*dT)*Tdot - dT*corr
+       else
+          T = T - corr
+          Tdot = 0.
+       endif
+       if (abs(corr) < eoserr*T) then
+          converged = .true.
+          exit
+       endif
+       ! Double precision has stopped improving in the local Newton
+       ! regime. Retry ionization in quad now, instead of waiting for the
+       ! iteration limit or a damping change. sqrt(epsilon) selects when
+       ! to retry; the convergence tolerance above remains eoserr.
+       if (.not.use_quad) then
+          if (abs(corr)<=sqrt(epsilon(T))*T .and. abs(residual)>=residual_prev) exit
+          residual_prev = abs(residual)
+       endif
+       if (n > 50) dT = 0.5
+    enddo
+    if (converged) exit precision_passes
+ enddo precision_passes
+ ! Tier 3: certify the rounded temperature using the full quad bracket.
+ if (.not.converged) then
+    use_quad = .true.
+    !$omp atomic update
+    nfallback_quad = nfallback_quad + 1
+    call solve_temperature_quad(rhoi,presi,T,X,Y,do_radiation_local,.true.,converged,corr)
+ endif
+ if (.not.converged) then
     print*,'Error in calc_uT_from_rhoP_hormone'
-    print*,'rho=',rhoi,'P=',presi,'mu=',1./imu
+    print*,'rho=',rhoi,'P=',presi,'T=',T,'X=',X,'Y=',Y,'correction=',corr
     ierr = 1
     return
  endif
+ ierr = 0
  call calc_uP_from_rhoT_gasradrec(rhoi,T,X,Y,u,p1,imu,do_radiation_local)
- mui = 1./imu
+ if (present(mui)) mui = 1./imu
 
 end subroutine calc_uT_from_rhoP_gasradrec
+
+!-----------------------------------------------------------------------
+!+
+!  Recover a stalled temperature solve without relaxing eoserr. The fit,
+!  residual and safeguarded Newton steps stay in quad precision. A sign
+!  bracket bounds the error independently of the derivative approximation.
+!  Verify both this bound and the correction at the rounded output T.
+!+
+!-----------------------------------------------------------------------
+subroutine solve_temperature_quad(d,target,T,X,Y,do_radiation,from_pressure,converged,corr)
+ use ionization_mod, only:qp
+ use, intrinsic :: ieee_arithmetic, only:ieee_is_finite
+ real, intent(in) :: d,target,X,Y
+ real, intent(inout) :: T
+ logical, intent(in) :: do_radiation,from_pressure
+ logical, intent(out) :: converged
+ real, intent(out) :: corr
+ real(qp) :: dq,targetq,Xq,Yq,logdq,Tq,Tlo,Thi,f,df,candidate,tolq,bound
+ integer :: n
+ integer, parameter :: nmax=512
+
+ converged = .false.
+ corr = huge(corr)
+ if (.not.ieee_is_finite(d).or..not.ieee_is_finite(target)) return
+ if (d <= 0. .or. target <= 0.) return
+ if (.not.ieee_is_finite(X).or..not.ieee_is_finite(Y)) return
+ if (X < 0. .or. Y < 0. .or. X+Y > 1.) return
+ dq=real(d,qp); targetq=real(target,qp); Xq=real(X,qp); Yq=real(Y,qp)
+ logdq=log10(dq)
+ Tq=1._qp
+ if (ieee_is_finite(T)) then
+    if (T > 0.) Tq=real(T,qp)
+ endif
+ tolq=real(eoserr,qp)
+ call temperature_residual_quad(logdq,dq,Tq,Xq,Yq,targetq,do_radiation,from_pressure,f,df)
+ if (.not.ieee_is_finite(f)) return
+
+ Tlo=Tq; Thi=Tq
+ ! For a thermally stable EOS, F grows with T. Expand towards the missing
+ ! sign; bounded loops also handle invalid states without hanging.
+ if (f < 0._qp) then
+    do n=1,nmax
+       Thi=2._qp*Thi
+       call temperature_residual_quad(logdq,dq,Thi,Xq,Yq,targetq,do_radiation,from_pressure,f,df)
+       if (.not.ieee_is_finite(f)) return
+       if (f >= 0._qp) exit
+       Tlo=Thi
+    enddo
+ elseif (f > 0._qp) then
+    do n=1,nmax
+       Tlo=0.5_qp*Tlo
+       call temperature_residual_quad(logdq,dq,Tlo,Xq,Yq,targetq,do_radiation,from_pressure,f,df)
+       if (.not.ieee_is_finite(f)) return
+       if (f <= 0._qp) exit
+       Thi=Tlo
+    enddo
+ else
+    n=0
+ endif
+ if (n > nmax) return
+
+ Tq=Tlo+0.5_qp*(Thi-Tlo)
+ do n=1,nmax
+    call temperature_residual_quad(logdq,dq,Tq,Xq,Yq,targetq,do_radiation,from_pressure,f,df)
+    if (.not.ieee_is_finite(f)) return
+    if (f == 0._qp) then
+       Tlo=Tq; Thi=Tq
+    elseif (f < 0._qp) then
+       Tlo=Tq
+    else
+       Thi=Tq
+    endif
+    ! Leave headroom for the final rounding to default real.
+    if (Thi-Tlo <= 0.25_qp*tolq*Tq) exit
+    candidate=Tlo+0.5_qp*(Thi-Tlo)
+    if (ieee_is_finite(df)) then
+       if (df > 0._qp) then
+          bound=Tq-f/df
+          ! Contract the bracket even when Newton hugs an endpoint.
+          if (bound > Tlo+0.1_qp*(Thi-Tlo) .and. bound < Thi-0.1_qp*(Thi-Tlo)) candidate=bound
+       endif
+    endif
+    Tq=candidate
+ enddo
+ if (n > nmax) return
+
+ T=real(Tlo+0.5_qp*(Thi-Tlo),kind(T))
+ if (.not.ieee_is_finite(T)) return
+ if (T <= 0.) return
+ Tq=real(T,qp)
+ bound=max(abs(Tq-Tlo),abs(Thi-Tq))
+ call temperature_residual_quad(logdq,dq,Tq,Xq,Yq,targetq,do_radiation,from_pressure,f,df)
+ if (.not.ieee_is_finite(f).or..not.ieee_is_finite(df)) return
+ if (df <= 0._qp) return
+ corr=real(f/df,kind(corr))
+ converged = bound <= tolq*Tq .and. abs(f/df) <= tolq*Tq
+
+end subroutine solve_temperature_quad
+
+! The energy target is per volume; the pressure target is in cgs.
+subroutine temperature_residual_quad(logd,d,T,X,Y,target,do_radiation,from_pressure,f,df)
+ use ionization_mod, only:qp,get_erec_cveff_qp
+ use physcon, only:Rg,radconst
+ real(qp), intent(in) :: logd,d,T,X,Y,target
+ logical, intent(in) :: do_radiation,from_pressure
+ real(qp), intent(out) :: f,df
+ real(qp) :: erec,cveff,imu,derecdT,dcveffdlnT,dimurecdlnT,Rgq,aq
+
+ Rgq=real(Rg,qp); aq=real(radconst,qp)
+ if (from_pressure) then
+    call get_erec_cveff_qp(logd,T,X,Y,erec,cveff,imu,dimurecdlnT=dimurecdlnT)
+    f=d*Rgq*imu*T-target
+    df=d*Rgq*(imu+dimurecdlnT)
+    if (.not.do_radiation) then
+       f=f+aq*T**4/3._qp
+       df=df+4._qp*aq*T**3/3._qp
+    endif
+ else
+    call get_erec_cveff_qp(logd,T,X,Y,erec,cveff,imu,derecdT,dcveffdlnT)
+    f=d*(Rgq*cveff*T+erec)-target
+    df=d*(Rgq*(cveff+dcveffdlnT)+derecdT)
+    if (.not.do_radiation) then
+       f=f+aq*T**4
+       df=df+4._qp*aq*T**3
+    endif
+ endif
+
+end subroutine temperature_residual_quad
+
+!-----------------------------------------------------------------------
+!+
+!  Report tier 2 (ionization-only quad) retries and tier 3 (full quad)
+!  fallbacks separately, then reset both counters.
+!+
+!-----------------------------------------------------------------------
+subroutine report_newton_stalls(iprint,ntot,ieos)
+ use io,        only:warning
+ use mpiutils,  only:reduceall_mpi
+ integer,          intent(in) :: iprint
+ integer,          intent(in) :: ieos
+ integer(kind=8),  intent(in) :: ntot
+ integer(kind=8) :: nstall_total,nfallback_total
+ character(len=120) :: message
+
+ if (ieos /= 20) then
+    nstall_newton = 0
+    nfallback_quad = 0
+    return
+ endif
+
+ nstall_total = reduceall_mpi('+',nstall_newton)
+ nfallback_total = reduceall_mpi('+',nfallback_quad)
+ if (nstall_total > 0) then
+    write(message,'(a,i0,a)') 'Ionization-only quad retry used for ',nstall_total,&
+         ' EOS temperature solves this timestep'
+    call warning('eos_gasradrec',trim(message))
+ endif
+ if (nfallback_total > 0) then
+    write(message,'(a,i0,a)') 'Full bracketed quad fallback used for ',nfallback_total,&
+         ' EOS temperature solves this timestep'
+    call warning('eos_gasradrec',trim(message))
+ endif
+ nstall_newton = 0
+ nfallback_quad = 0
+
+end subroutine report_newton_stalls
+
+!-----------------------------------------------------------------------
+!+
+!  Reset both tier counters without printing.
+!+
+!-----------------------------------------------------------------------
+subroutine reset_newton_stalls
+
+ nstall_newton = 0
+ nfallback_quad = 0
+
+end subroutine reset_newton_stalls
 
 !-----------------------------------------------------------------------
 !+

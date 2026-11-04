@@ -14,7 +14,7 @@ module testorbits
 !
 ! :Runtime parameters: None
 !
-! :Dependencies: orbits, setbinary, testutils
+! :Dependencies: infile_utils, orbits, setbinary, setorbit, testutils
 !
  use testutils, only:checkval,update_test_scores
  use orbits,    only:get_eccentricity,get_semimajor_axis, get_orbital_period, &
@@ -42,6 +42,8 @@ subroutine test_orbits(ntests,npass)
  integer, intent(inout) :: ntests,npass
 
  call test_circular_orbit(ntests,npass)
+ call test_roche_lobe_orbit(ntests,npass)
+ call test_roche_orbit_options(ntests,npass)
  call test_true_anomaly_from_separation(ntests,npass)
  call test_time_to_separation_ellipse(ntests,npass)
  call test_convert_flyby(ntests,npass)
@@ -50,6 +52,116 @@ subroutine test_orbits(ntests,npass)
  call test_set_binary_full_elements(ntests,npass)
 
 end subroutine test_orbits
+
+! Verify the complete orbit, including the donor/companion mass convention
+! in Eggleton's formula and the circular velocities about the barycentre.
+subroutine test_roche_lobe_orbit(ntests,npass)
+ use setorbit, only:orbit_t,set_defaults_orbit,set_roche_lobe_orbit,set_orbit
+ integer, intent(inout) :: ntests,npass
+ type(orbit_t) :: orbit
+ real :: xyzmh(6,2),vxyz(3,2),dx(3),dv(3),m1,m2,r1,q13,fraction,a_expected,overflow
+ real, parameter :: tol_roche = 2.e-11
+ integer :: itest,nptmass,ierr,nfailed(9)
+
+ do itest=1,3
+    m1 = 15.
+    m2 = 5.
+    if (itest==1) m2 = m1
+    r1 = 600.
+    overflow = 10.*real(itest-1)
+    q13 = (m1/m2)**(1./3.)
+    fraction = 0.49*q13*q13/(0.6*q13*q13+log(1.+q13))
+    a_expected = r1/((1.+overflow/100.)*fraction)
+    call set_defaults_orbit(orbit)
+    orbit%e = 0.8
+    call set_roche_lobe_orbit(orbit,m1,m2,r1,overflow,ierr)
+    call checkval(ierr,0,0,nfailed(1),'Roche orbit accepts valid stellar inputs')
+    call checkval(orbit%e,0.,tol,nfailed(2),'Roche orbit forces a circular orbit')
+    call checkval(orbit%a,a_expected,tol_roche,nfailed(3),'Roche separation uses donor mass ratio')
+    nptmass = 0
+    call set_orbit(orbit,m1,m2,0.,0.,xyzmh,vxyz,nptmass,.false.,ierr)
+    dx = xyzmh(1:3,2)-xyzmh(1:3,1)
+    dv = vxyz(:,2)-vxyz(:,1)
+    call checkval(ierr,0,0,nfailed(4),'Roche orbit creates two-body positions and velocities')
+    call checkval(get_eccentricity(m1+m2,dx,dv),0.,tol_roche,nfailed(5),'Roche velocities give zero eccentricity')
+    call checkval(r1/(sqrt(dot_product(dx,dx))*fraction),1.+overflow/100.,tol_roche,nfailed(6), &
+                  'particle radius has the requested Roche-lobe overflow')
+    call checkval(maxval(abs(m1*vxyz(:,1)+m2*vxyz(:,2))),0.,tol_roche,nfailed(7),'Roche orbit conserves momentum')
+    call checkval(maxval(abs(m1*xyzmh(1:3,1)+m2*xyzmh(1:3,2))),0.,tol_roche,nfailed(8), &
+                  'Roche orbit is centred on the barycentre')
+    call checkval(orbit%period,2.*pi*sqrt(a_expected**3/(m1+m2)),tol_roche,nfailed(9),'Roche orbital period')
+    call update_test_scores(ntests,nfailed,npass)
+ enddo
+
+ do itest=1,4
+    m1=15.; m2=5.; r1=600.; overflow=0.
+    select case(itest)
+    case(1)
+       m1 = 0.
+    case(2)
+       m2 = -1.
+    case(3)
+       r1 = 0.
+    case(4)
+       overflow = -1.
+    end select
+    call set_roche_lobe_orbit(orbit,m1,m2,r1,overflow,ierr)
+    call checkval(ierr,1,0,nfailed(1),'Roche orbit rejects invalid masses, radius or overflow')
+    call update_test_scores(ntests,nfailed(1:1),npass)
+ enddo
+
+end subroutine test_roche_lobe_orbit
+
+! itype=5 must parse without a donor radius or manual orbital elements,
+! and its setup-file output must expose the matching overflow parameter.
+subroutine test_roche_orbit_options(ntests,npass)
+ use setorbit, only:orbit_t,read_options_orbit,write_options_orbit,iorbit_roche
+ use infile_utils, only:inopts
+ integer, intent(inout) :: ntests,npass
+ type(orbit_t) :: orbit
+ type(inopts), allocatable :: db(:)
+ integer :: nerr,iunit,ios,nfailed(6)
+ character(len=256) :: line
+ logical :: menu,overflow,manual
+
+ allocate(db(2))
+ db%retrieved = .false.
+ db(1)%tag='itype'; db(1)%val='5'
+ db(2)%tag='roche_overflow1'; db(2)%val='10'
+ nerr=0
+ call read_options_orbit(orbit,1.,1.,db,nerr,allow_roche=.true.)
+ call checkval(nerr,0,0,nfailed(1),'itype=5 parses before measuring the donor radius')
+ call checkval(orbit%input_type,iorbit_roche,0,nfailed(2),'Roche mode is selected by itype')
+ call checkval(orbit%roche_overflow,10.,tol,nfailed(3),'Roche overflow percentage is read')
+ open(newunit=iunit,status='scratch',form='formatted')
+ call write_options_orbit(orbit,iunit,allow_roche=.true.)
+ rewind(iunit)
+ menu=.false.; overflow=.false.; manual=.false.
+ do
+    read(iunit,'(a)',iostat=ios) line
+    if (ios/=0) exit
+    if (index(line,'5=Roche circular')>0) menu=.true.
+    if (index(line,'roche_overflow1')>0) overflow=.true.
+    if (index(adjustl(line),'a =')==1 .or. index(adjustl(line),'e =')==1) manual=.true.
+ enddo
+ close(iunit)
+ call checkval(menu,.true.,nfailed(4),'setup menu advertises itype=5')
+ call checkval(overflow,.true.,nfailed(5),'setup prints the Roche overflow option')
+ call checkval(manual,.false.,nfailed(6),'Roche setup omits manual separation and eccentricity')
+ call update_test_scores(ntests,nfailed,npass)
+
+ deallocate(db)
+ allocate(db(1))
+ db%retrieved=.false.
+ db(1)%tag='itype'; db(1)%val='5'
+ nerr=0
+ call read_options_orbit(orbit,1.,1.,db,nerr,allow_roche=.true.)
+ call checkval(nerr,1,0,nfailed(1),'missing overflow requests setup-file regeneration')
+ call checkval(orbit%input_type,iorbit_roche,0,nfailed(2),'setup-file regeneration retains itype=5')
+ call checkval(orbit%roche_overflow,0.,tol,nfailed(3),'missing overflow defaults to contact for regeneration')
+ call update_test_scores(ntests,nfailed(1:3),npass)
+
+end subroutine test_roche_orbit_options
 
 !--------------------------------------------
 !+

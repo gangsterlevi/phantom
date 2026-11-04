@@ -111,7 +111,7 @@ subroutine write_options_radiation(iunit)
  if (implicit_radiation) then
     call write_inopt(tol_rad,'tol_rad','tolerance on backwards Euler implicit solve of dxi/dt',iunit)
     call write_inopt(itsmax_rad,'itsmax_rad','max number of iterations for radiation implicit solve',iunit)
-    call write_inopt(cv_type,'cv_type','how to get cv and mean mol weight (0=constant,1=mesa)',iunit)
+    call write_inopt(cv_type,'cv_type','temperature conversion (0=constant,1=MESA,20=gas+rec)',iunit)
  endif
 
 end subroutine write_options_radiation
