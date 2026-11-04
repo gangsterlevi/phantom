@@ -1275,15 +1275,17 @@ end function get_mean_molecular_weight
 ! (see comments for definition of u)
 !+
 !---------------------------------------------------------
-real function get_cv(cv_type,rho,u,mu_local,X_local,Z_local,gamma_local) result(cv)
+real function get_cv(cv_type,rho,u,mu_local,X_local,Z_local,gamma_local,temperature_guess) result(cv)
  use mesa_microphysics, only:getvalue_mesa
  use units,             only:unit_ergg,unit_density
  use physcon,           only:Rg,radconst
- use eos_gasradrec,     only:equationofstate_gasradrec
+ use eos_gasradrec,     only:get_temperature_gasradrec
  use ionization_mod,    only:get_erec_cveff
+ use, intrinsic :: ieee_arithmetic, only:ieee_is_finite
  integer, intent(in) :: cv_type
  real,    intent(in), optional :: rho,u,X_local,Z_local,mu_local,gamma_local
- real :: rho_cgs,u_cgs,temp,imu,X,Z,pres_cgs,cs_cgs,gamma_eff,mu,u_gasrec,cveff,erec,gam
+ real,    intent(in), optional :: temperature_guess
+ real :: rho_cgs,u_cgs,temp,X,Z,mu,u_gasrec,cveff,erec,gam
 
  X = X_in
  Z = Z_in
@@ -1304,8 +1306,12 @@ real function get_cv(cv_type,rho,u,mu_local,X_local,Z_local,gamma_local) result(
     rho_cgs = rho*unit_density
     u_cgs = u*unit_ergg
     temp = min(0.67*u_cgs*gmw/Rg, (u_cgs*rho_cgs/radconst)**0.25)  ! guess
-    call equationofstate_gasradrec(rho_cgs,rho_cgs*u_cgs,temp,imu,X,1.-X-Z,pres_cgs,&
-                                   cs_cgs,gamma_eff,cveff,do_radiation=do_radiation)
+    if (present(temperature_guess)) then
+       if (ieee_is_finite(temperature_guess)) then
+          if (temperature_guess > 0.) temp = temperature_guess
+       endif
+    endif
+    call get_temperature_gasradrec(rho_cgs,rho_cgs*u_cgs,temp,X,1.-X-Z,do_radiation=do_radiation)
 
     ! The radiation module needs the effective ratio u/T here, not the
     ! thermodynamic heat capacity du/dT.

@@ -86,7 +86,9 @@ subroutine test_eos_gasradrec(ntests,npass)
  do irecomb=0,3
     call test_hormone(ntests,npass)
     call test_hormone_quad(ntests,npass)
+    call test_hormone_temperature_only(ntests,npass)
  enddo
+ call test_cv_other_eos(ntests,npass)
 
 end subroutine test_eos_gasradrec
 
@@ -603,6 +605,93 @@ subroutine test_hormone_quad(ntests,npass)
  call update_test_scores(ntests,nfail,npass)
 
 end subroutine test_hormone_quad
+
+! Verify the shared temperature solver, warm guesses, and invalid-guess
+! fallback without changing the finite-difference EOS derivatives.
+subroutine test_hormone_temperature_only(ntests,npass)
+ use eos_gasradrec, only:equationofstate_gasradrec,get_temperature_gasradrec,calc_uP_from_rhoT_gasradrec
+ use eos, only:get_cv
+ use units, only:unit_density,unit_ergg
+ use dim, only:do_radiation
+ use testutils, only:checkvalbuf,checkvalbuf_end,update_test_scores
+ use, intrinsic :: ieee_arithmetic, only:ieee_value,ieee_positive_inf,ieee_quiet_nan
+ integer, intent(inout) :: ntests,npass
+ real, parameter :: X=0.7,Z=0.02
+ real, parameter :: densities(4)=[1.e-16,3.837070015716256e-10,1.e-8,1.e-6]
+ real, parameter :: temperatures(4)=[100.,12739.2678700768,4.e4,1.e6]
+ real :: rho,ene,p,imu,Tfull,Tonly,cs,gam,rhocode,ucode,cvref,cv,guesses(8),errmax(3)
+ integer :: mode,i,j,nfail(3),ncheck(3)
+ logical :: transport
+
+ nfail=0; ncheck=0; errmax=0.
+ do mode=0,1
+    transport=mode==1
+    do i=1,size(densities)
+       rho=densities(i)
+       call calc_uP_from_rhoT_gasradrec(rho,temperatures(i),X,1.-X-Z,ene,p,imu,transport)
+       Tfull=1.; Tonly=Tfull
+       call equationofstate_gasradrec(rho,rho*ene,Tfull,imu,X,1.-X-Z,p,cs,gam,do_radiation=transport)
+       call get_temperature_gasradrec(rho,rho*ene,Tonly,X,1.-X-Z,transport)
+       call checkvalbuf(Tonly,Tfull,0.,'temperature-only matches full EOS',nfail(1),ncheck(1),errmax(1))
+       if (transport.neqv.do_radiation) cycle
+       rhocode=rho/unit_density; ucode=ene/unit_ergg
+       cvref=get_cv(20,rhocode,ucode,X_local=X,Z_local=Z)
+       guesses=[-1.,0.,ieee_value(1.,ieee_positive_inf),ieee_value(1.,ieee_quiet_nan),&
+                0.99*temperatures(i),1.01*temperatures(i),1.e-3*temperatures(i),1.e3*temperatures(i)]
+       do j=1,size(guesses)
+          cv=get_cv(20,rhocode,ucode,X_local=X,Z_local=Z,temperature_guess=guesses(j))
+          if (j<=4) then
+             call checkvalbuf(cv,cvref,0.,'invalid temperature guess ignored',nfail(2),ncheck(2),errmax(2))
+          else
+             call checkvalbuf(cv,cvref,2.e-14,'warm cv matches cold cv',nfail(3),ncheck(3),errmax(3),use_rel_tol)
+          endif
+       enddo
+    enddo
+ enddo
+ call checkvalbuf_end('temperature-only matches full EOS',ncheck(1),nfail(1),errmax(1),0.)
+ call checkvalbuf_end('invalid temperature guess ignored',ncheck(2),nfail(2),errmax(2),0.)
+ call checkvalbuf_end('warm cv matches cold cv',ncheck(3),nfail(3),errmax(3),2.e-14)
+ call update_test_scores(ntests,nfail,npass)
+
+end subroutine test_hormone_temperature_only
+
+! Temperature hints apply only to cv_type=20. The constant conversions need
+! no rho/u arguments, and MESA continues to use its own tabulated inverse.
+subroutine test_cv_other_eos(ntests,npass)
+ use eos, only:get_cv
+ use mesa_microphysics, only:mesa_de_data
+ use units, only:unit_density,unit_ergg
+ use testutils, only:checkvalbuf,checkvalbuf_end,update_test_scores
+ use, intrinsic :: ieee_arithmetic, only:ieee_value,ieee_quiet_nan
+ integer, intent(inout) :: ntests,npass
+ integer :: i,j,nfail(2),ncheck(2)
+ real :: cvref,cv,guess,rho,u,errmax(2)
+
+ nfail=0; ncheck=0; errmax=0.
+ guess=ieee_value(1.,ieee_quiet_nan)
+ do i=0,2,2
+    cvref=get_cv(i,mu_local=0.62,gamma_local=5./3.)
+    cv=get_cv(i,mu_local=0.62,gamma_local=5./3.,temperature_guess=guess)
+    call checkvalbuf(cv,cvref,0.,'constant cv ignores temperature hint',nfail(1),ncheck(1),errmax(1))
+ enddo
+ ! The general EOS suite initialises MESA when its data tables are present.
+ ! The focused HORMONE suite remains usable without any MESA data files.
+ if (allocated(mesa_de_data)) then
+    do i=1,3
+       rho=10.**(-10+i)/unit_density
+       do j=1,3
+          u=10.**(11+j)/unit_ergg
+          cvref=get_cv(1,rho,u)
+          cv=get_cv(1,rho,u,temperature_guess=guess)
+          call checkvalbuf(cv,cvref,0.,'MESA cv ignores temperature hint',nfail(2),ncheck(2),errmax(2))
+       enddo
+    enddo
+ endif
+ call checkvalbuf_end('constant cv ignores temperature hint',ncheck(1),nfail(1),errmax(1),0.)
+ if (ncheck(2)>0) call checkvalbuf_end('MESA cv ignores temperature hint',ncheck(2),nfail(2),errmax(2),0.)
+ call update_test_scores(ntests,nfail,npass)
+
+end subroutine test_cv_other_eos
 
 !----------------------------------------------------------------------------
 !+

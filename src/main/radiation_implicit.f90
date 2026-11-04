@@ -24,7 +24,7 @@ module radiation_implicit
 !
  use part,            only:ikappa,ilambda,iedd,idkappa,iradxi,icv,ifluxx,ifluxy,ifluxz,igas,rho,massoftype,imu
  use eos,             only:iopacity_type,get_cv,eos_outputs_mu,use_var_comp
- use part,            only:iX,iZ,particle_eos_vars=>eos_vars
+ use part,            only:iX,iZ,itemp,particle_eos_vars=>eos_vars
  use radiation_utils, only:get_kappa,tol_rad,itsmax_rad,cv_type
  implicit none
  integer, parameter :: ierr_failed_to_converge = 1,&
@@ -52,15 +52,31 @@ contains
 
 ! Use the same composition as the particle EoS when converting energy to
 ! temperature. The implicit solver needs u/T, not the derivative du/dT.
-real function get_cv_particle(i,rhoi,ui) result(cv)
+real function get_cv_particle(i,rhoi,ui,temperature_guess) result(cv)
  integer, intent(in) :: i
  real, intent(in) :: rhoi,ui
+ real, intent(in), optional :: temperature_guess
+ real :: guess
 
- if (cv_type==20 .and. use_var_comp) then
-    cv = get_cv(cv_type,rhoi,ui,X_local=particle_eos_vars(iX,i),Z_local=particle_eos_vars(iZ,i))
- else
-    cv = get_cv(cv_type,rhoi,ui)
+ ! A guess is local to this call: never cache an EOS result for a changed
+ ! energy, density or composition. Other cv_type values keep their old path.
+ if (cv_type==20) then
+    guess = -1.
+    if (allocated(particle_eos_vars)) then
+       if (size(particle_eos_vars,1)>=itemp .and. i>=1 .and. i<=size(particle_eos_vars,2)) &
+          guess = particle_eos_vars(itemp,i)
+    endif
+    if (present(temperature_guess)) guess = temperature_guess
+    if (use_var_comp) then
+       cv = get_cv(cv_type,rhoi,ui,X_local=particle_eos_vars(iX,i),Z_local=particle_eos_vars(iZ,i),&
+                   temperature_guess=guess)
+    else
+       cv = get_cv(cv_type,rhoi,ui,temperature_guess=guess)
+    endif
+    return
  endif
+
+ cv = get_cv(cv_type,rhoi,ui)
 
 end function get_cv_particle
 
@@ -1058,7 +1074,11 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
        if (.not. iamtype(iphase(i))==iboundary) then
           EU0(1,i) = E1i
           EU0(2,i) = U1i
-          EU0(3,i) = get_cv_particle(i,rhoi,U1i)
+          if (cv_type==20) then
+             EU0(3,i) = get_cv_particle(i,rhoi,U1i,temperature_guess=Ui/cvi)
+          else
+             EU0(3,i) = get_cv_particle(i,rhoi,U1i)
+          endif
           EU0(4,i) = get_kappa(iopacity_type,U1i,EU0(3,i),rhoi)
        endif
 
@@ -1154,14 +1174,14 @@ subroutine set_heating_cooling_low_rhoT(i,eradi,ugasi,orig_eradi,orig_ugasi,cvi,
  if (.true.) then
     try_loop: do itry = 1,2
        u_found = ugasi  ! ugasi = EU0(2,i)
-       t_found = ugasi/get_cv_particle(i,rhoi,u_found)
+       t_found = ugasi/get_cv_particle(i,rhoi,u_found,temperature_guess=gas_temp)
        t_orig = t_found
        do iterationloop = 1,100
           u_last = u_found
           t_last = t_found
 
           u_found = get_u_from_rhoT(rhoi,t_found,ieos)
-          cv1 = get_cv_particle(i,rhoi,u_found)
+          cv1 = get_cv_particle(i,rhoi,u_found,temperature_guess=t_last)
           t_found = u_found/cv1
           !
           !--For calculating numerical derivative with gas temperature,

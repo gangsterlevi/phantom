@@ -1,0 +1,213 @@
+{
+  "baseline_ref": "c7d68f465",
+  "snapshot": "/home/levi/rad_heian/sim_00088",
+  "flags": [
+    "-O3",
+    "-Wall",
+    "-Wno-unused-dummy-argument",
+    "-frecord-marker=4",
+    "-g",
+    "-finline-functions-called-once",
+    "-finline-limit=1500",
+    "-funroll-loops",
+    "-ftree-vectorize",
+    "-std=f2008",
+    "-fall-intrinsics",
+    "-fPIC",
+    "-fopenmp",
+    "-fdefault-real-8",
+    "-fdefault-double-8"
+  ],
+  "compiler": "GNU Fortran (GCC) 15.2.0",
+  "cpu": 0,
+  "workloads": {
+    "snapshot": {
+      "n": 1000,
+      "operation": "cv",
+      "variants": {
+        "baseline": {
+          "tier2": 223,
+          "tier3": 0,
+          "max_tier1_iterations": 500,
+          "total_tier1_iterations": 13421,
+          "max_tier2_iterations": 44,
+          "max_relative_T_difference": 0.0,
+          "samples_us": [
+            28.75322222222222,
+            29.370666666666665,
+            28.848666666666663,
+            29.048999999999996,
+            29.261888888888883
+          ],
+          "median_us": 29.048999999999996,
+          "speedup": 1.0
+        },
+        "warm_only": {
+          "tier2": 18,
+          "tier3": 0,
+          "max_tier1_iterations": 500,
+          "total_tier1_iterations": 10414,
+          "max_tier2_iterations": 2,
+          "max_relative_T_difference": 2.9976021664879227e-15,
+          "samples_us": [
+            2.603795698924731,
+            2.4067311827956988,
+            2.4159139784946237,
+            2.4622258064516127,
+            2.445301075268817
+          ],
+          "median_us": 2.445301075268817,
+          "speedup": 11.879518761020696
+        },
+        "temperature_only": {
+          "tier2": 223,
+          "tier3": 0,
+          "max_tier1_iterations": 500,
+          "total_tier1_iterations": 13421,
+          "max_tier2_iterations": 44,
+          "max_relative_T_difference": 0.0,
+          "samples_us": [
+            25.050454545454546,
+            25.021272727272727,
+            25.08454545454545,
+            25.011454545454544,
+            25.167272727272728
+          ],
+          "median_us": 25.050454545454546,
+          "speedup": 1.1596196766525737
+        },
+        "early_only": {
+          "tier2": 225,
+          "tier3": 0,
+          "max_tier1_iterations": 27,
+          "total_tier1_iterations": 12740,
+          "max_tier2_iterations": 44,
+          "max_relative_T_difference": 2.220446049250313e-15,
+          "samples_us": [
+            29.476,
+            28.72377777777778,
+            28.683777777777777,
+            29.483888888888888,
+            29.780666666666665
+          ],
+          "median_us": 29.476,
+          "speedup": 0.9855136382141402
+        },
+        "warm_temperature": {
+          "tier2": 18,
+          "tier3": 0,
+          "max_tier1_iterations": 500,
+          "total_tier1_iterations": 10414,
+          "max_tier2_iterations": 2,
+          "max_relative_T_difference": 2.9976021664879227e-15,
+          "samples_us": [
+            1.7962777777777774,
+            1.8175416666666666,
+            1.7950069444444443,
+            1.9334652777777779,
+            1.7860347222222221
+          ],
+          "median_us": 1.7962777777777774,
+          "speedup": 16.171774966752235
+        },
+        "all": {
+          "tier2": 20,
+          "tier3": 0,
+          "max_tier1_iterations": 21,
+          "total_tier1_iterations": 9692,
+          "max_tier2_iterations": 2,
+          "max_relative_T_difference": 2.9976021664879227e-15,
+          "samples_us": [
+            1.7351102362204724,
+            1.7521496062992123,
+            1.7329055118110237,
+            1.736275590551181,
+            1.8926614173228347
+          ],
+          "median_us": 1.736275590551181,
+          "speedup": 16.730638936632396
+        }
+      }
+    },
+    "tier1_plateau": {
+      "n": 1,
+      "operation": "cv",
+      "variants": {
+        "baseline": {
+          "tier2": 1,
+          "tier3": 0,
+          "max_tier1_iterations": 500,
+          "total_tier1_iterations": 500,
+          "max_tier2_iterations": 1,
+          "max_relative_T_difference": 0.0,
+          "samples_us": [
+            82.64134025483719,
+            82.07833883907503,
+            82.36054742803209,
+            81.98489853704578,
+            81.66352052855119
+          ],
+          "median_us": 82.07833883907503,
+          "speedup": 1.0
+        },
+        "early_only": {
+          "tier2": 1,
+          "tier3": 0,
+          "max_tier1_iterations": 22,
+          "total_tier1_iterations": 22,
+          "max_tier2_iterations": 1,
+          "max_relative_T_difference": 4.440892098500626e-16,
+          "samples_us": [
+            23.766638935108155,
+            23.86387271214642,
+            24.293781198003323,
+            23.905262063227955,
+            24.10284941763727
+          ],
+          "median_us": 23.905262063227955,
+          "speedup": 3.433484168547613
+        }
+      }
+    },
+    "stalled": {
+      "n": 6,
+      "operation": "solver",
+      "variants": {
+        "baseline": {
+          "tier2": 6,
+          "tier3": 6,
+          "max_tier1_iterations": 7,
+          "total_tier1_iterations": 42,
+          "max_tier2_iterations": 500,
+          "max_relative_T_difference": 0.0,
+          "samples_us": [
+            3454.8333333333326,
+            3491.730769230769,
+            3464.346153846154,
+            3517.5897435897427,
+            3490.3333333333335
+          ],
+          "median_us": 3490.3333333333335,
+          "speedup": 1.0
+        },
+        "early_only": {
+          "tier2": 6,
+          "tier3": 6,
+          "max_tier1_iterations": 7,
+          "total_tier1_iterations": 42,
+          "max_tier2_iterations": 105,
+          "max_relative_T_difference": 1.1102230246251565e-16,
+          "samples_us": [
+            1118.8760683760684,
+            1115.162393162393,
+            1123.1837606837607,
+            1111.440170940171,
+            1130.4444444444443
+          ],
+          "median_us": 1118.8760683760684,
+          "speedup": 3.1194994977407884
+        }
+      }
+    }
+  }
+}
