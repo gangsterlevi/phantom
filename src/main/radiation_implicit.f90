@@ -1082,6 +1082,9 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
           mask(i) = .true.
        endif
        !
+       !--Damp the nonlinear radiation update as well as the gas update.
+       if (mask(i)) E1i = 0.5*(Ei + E1i)
+       !
        !--Copy values
        !
        if (.not. iamtype(iphase(i))==iboundary) then
