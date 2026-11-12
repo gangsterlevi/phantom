@@ -12,6 +12,8 @@ echo '#'
 echo 'PHANTOMDIR='${0/scripts\/writemake.sh/};
 echo 'SPLASHDIR='$splashdir
 echo 'EDITOR=vi'
+echo '# Stop the recipe if changing directory or building fails.'
+echo '.SHELLFLAGS := -ec'
 makeflags='RUNDIR="${PWD}"';
 if [ $# -ge 1 ]; then
    echo 'ifndef SETUP';

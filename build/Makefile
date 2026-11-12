@@ -72,6 +72,10 @@ LIBTOOL=ar rcs
 # Heian configuration
 ifeq ($(SYSTEM),heian)
     include Makefile_defaults_ifx
+    # Use the tested -O3 configuration without IPO for stellar-profile setup.
+    # Retain source locations in release tracebacks for further diagnosis.
+    FFLAGS := $(filter-out -ipo,$(FFLAGS)) -g -traceback
+    CCFLAGS := $(filter-out -ipo,$(CCFLAGS))
     QSYS = slurm
     KNOWN_SYSTEM=yes
 ifeq ($(MPI),heian)
