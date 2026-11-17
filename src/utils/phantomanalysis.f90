@@ -24,7 +24,7 @@ program phantomanalysis
  use infile_utils,    only:open_db_from_file,inopts,read_inopt,close_db
  use fileutils,       only:numfromfile,basename
  use analysis,        only:do_analysis,analysistype
- use eos,             only:ieos
+ use eos,             only:ieos,X_in,Z_in,irecomb
  use eos_stamatellos, only:init_coolra,finish_coolra
  use kernel,          only:hfact_default
  use externalforces,  only:mass1,accradius1
@@ -76,6 +76,10 @@ program phantomanalysis
        if (iexist) then
           call open_db_from_file(db,infile,ianalysis,ierr)
           call read_inopt(ieos,'ieos',db,ierr)
+          call read_inopt(X_in,'X',db,ierr)
+          call read_inopt(Z_in,'Z',db,ierr)
+          call read_inopt(irecomb,'irecomb',db,ierr)
+          idust_opacity = 0
           call read_inopt(idust_opacity,'idust_opacity',db,ierr)
           if (idust_opacity == 2) then
              do_nucleation = .true.
@@ -101,6 +105,12 @@ program phantomanalysis
     endif
 
     if (ierr==is_small_dump) then
+       ! CE energies and thermodynamics require the state stored in full dumps.
+       ! Do not analyse fabricated internal energies or zeroed velocities.
+       if (analysistype=='common_envelope') then
+          write(*,'(a)') ' Skipping '//trim(dumpfile)//': common-envelope analysis requires a full dump'
+          cycle over_args
+       endif
        close(idisk1)
        !--if it is a small dump, look for a file called dumpfile.binary
        !  (this is a workaround to at least obtain what information there is in small dump files)

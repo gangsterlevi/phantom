@@ -129,6 +129,37 @@ which you can then run on a series of snapshots
 Phantomanalysis is a simple wrapper that reads all of the dump files on the command line in sequence and calls the analysis routine specified in the ANALYSIS variable, in this case analysis_disc.f90. For a list of pre-built analysis tools, see the :doc:`list of Phantom
 utilities <utils>`.
 
+Common-envelope analysis with radiation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Build with the same setup as the simulation, for example::
+
+   make SETUP=radbinary NOWARN=yes phantomanalysis
+   ./bin/phantomanalysis /path/to/run/sim_*
+
+The common-envelope analysis skips small dumps because they do not contain
+the gas energies and velocities needed for its diagnostics. Analysis options
+are prompted once, at the first full dump. EOS options from the run's ``.in``
+file supply prompt defaults, and EOS 20 uses particle compositions when these
+are stored in the dump.
+
+For radiation hydrodynamics, ``u`` contains gas internal energy, including
+the selected recombination contributions, while ``xi`` contains the evolved
+radiation energy. The EOS 20 thermal binding energy excludes recombination
+energy and includes ``xi``; it does not assume the radiation temperature is
+equal to the gas temperature. The internal binding energy includes both
+``u`` and ``xi``. Envelope binding energy (option 21) includes gas self-gravity
+and the primary core's gravity, excluding the companion. Accreted particles
+are excluded from these binding energies.
+
+The total-energy output (option 3) includes radiation and appends a separate
+``rad energy`` column. It measures energy currently present in active gas and
+live sinks, without reconstructing energy removed by accretion.
+
+The radiation analysis regression can be run after the build using::
+
+   python3 scripts/test_analysis_ce_rad.py
+
 Compiling your own phantomanalysis module
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
