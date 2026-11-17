@@ -17,10 +17,10 @@ module testradiation
 !
 ! :Runtime parameters: None
 !
-! :Dependencies: boundary, deriv, dim, eos, implicit, io, kernel, mpidomain,
-!   mpiutils, neighkdtree, options, part, physcon, radiation_implicit,
-!   radiation_utils, readwrite_dumps, sortutils, step_lf_global, testutils,
-!   timestep, unifdis, units
+! :Dependencies: apr, boundary, deriv, dim, eos, eos_gasradrec, implicit,
+!   io, kernel, mpidomain, mpiutils, neighkdtree, options, part, physcon,
+!   radiation_implicit, radiation_utils, readwrite_dumps, sortutils,
+!   step_lf_global, testutils, timestep, unifdis, units
 !
  use part,      only:ithick,iradxi,ifluxx,ifluxy,ifluxz,ikappa
  use io,        only:id,master
@@ -104,22 +104,24 @@ end subroutine test_implicit_workspace_growth
 
 ! An optically thin particle between fixed radiation reservoirs can cycle
 ! as its flux limiter changes. Check convergence against the diffusion
-! equation, including when the gas has no energy to exchange.
+! equation, including when the gas has no energy to exchange. Linear solves
+! before and after it must take full updates, without retaining the damping.
 subroutine test_implicit_thin_diffusion(ntests,npass)
  use part, only:init_part,npart,npartoftype,massoftype,hfact,xyzh,vxyzu,rho,rad,radprop,drad,&
-                iphase,isetphase,igas,iboundary,gradh,luminosity,init_rho_from_h
+                iphase,isetphase,igas,iboundary,gradh,luminosity,init_rho_from_h,itlastrad
  use boundary, only:set_boundary
  use kernel, only:grkern,cnormk,hfact_default
  use units, only:unit_opacity,get_c_code
  use eos, only:iopacity_type,get_cv,gamma,gmw
  use radiation_utils, only:kappa_cgs,cv_type,tol_rad,itsmax_rad,exchange_radiation_energy,&
                           limit_radiation_flux,get_rad_R
- use radiation_implicit, only:do_radiation_implicit,rad_errorE
+ use radiation_implicit, only:do_radiation_implicit,rad_errorE,its_global
  use neighkdtree, only:build_tree
  use mpiutils, only:reduceall_mpi
  integer, intent(inout) :: ntests,npass
- integer :: ierr,j,nerr(5),opacity_prev,cv_prev,limit_prev
+ integer :: ierr,j,itest,nerr(6),opacity_prev,cv_prev,limit_prev
  real :: kappa_prev,tol_prev,gamma_prev,gmw_prev,dt,c_code,gradient(3),lambda,coeff,residual,diagonal,dW,r,xi
+ real :: expected_xi,numerator
  real, parameter :: kappa_code = 1.e-7,xi0 = 1.0001
  logical :: exchange_prev,limiter_prev
 
@@ -167,45 +169,61 @@ subroutine test_implicit_thin_diffusion(ntests,npass)
  call build_tree(npart,npart,xyzh,vxyzu)
  c_code = get_c_code()
  dt = 2./c_code
- call do_radiation_implicit(dt,dt,npart,rad,xyzh,vxyzu,radprop,drad,ierr)
- call checkval(ierr,0,0,nerr(1),'optically thin diffusion converges without gas exchange')
- call checkval(rad_errorE,0.,tol_rad,nerr(2),'full radiation proposal satisfies tolerance')
+ do itest=1,3
+    limit_radiation_flux = itest==2
+    if (id==master) rad(iradxi,1:3) = [xi0,1.0004/rho(2),0.9996/rho(3)]
+    radprop(itlastrad,1:npart) = 0.
+    call do_radiation_implicit(dt,dt,npart,rad,xyzh,vxyzu,radprop,drad,ierr)
+    call checkval(ierr,0,0,nerr(1),'diffusion converges without gas exchange')
+    call checkval(rad_errorE,0.,tol_rad,nerr(2),'full radiation proposal satisfies tolerance')
 
- ! Assemble the backwards Euler defect for the gas particle independently.
- ! The reservoirs have no neighbours inside their own kernels, so lambda=1/3.
- residual = 0.
- xi = 0.
- if (id==master) then
-    xi = rad(iradxi,1)
-    gradient = 0.
-    do j=2,3
-       r = xyzh(1,j)
-       dW = grkern(r*r,r)*cnormk
-       gradient(1) = gradient(1) - massoftype(igas)*dW*(rho(j)*rad(iradxi,j)-rho(1)*xi)/rho(1)
-    enddo
-    r = get_rad_R(rho(1),xi,gradient,kappa_code)
-    lambda = (2.+r)/(6.+3.*r+r*r)
-    residual = xi0-xi
-    diagonal = 1.
-    do j=2,3
-       r = xyzh(1,j)
-       dW = grkern(r*r,r)*cnormk
-       coeff = -0.5*dt*c_code*massoftype(igas)*dW/(r*rho(1)*rho(j))* &
-               (lambda/(kappa_code*rho(1)) + 1./(3.*kappa_code*rho(j)))
-       residual = residual + coeff*(rho(j)*rad(iradxi,j)-rho(1)*xi)
-       diagonal = diagonal + coeff*rho(1)
-    enddo
-    residual = abs(residual)/(diagonal*xi)
- endif
- residual = reduceall_mpi('max',residual)
- call checkval(residual,0.,tol_rad,nerr(3),'optically thin backwards Euler defect')
- xi = reduceall_mpi('max',xi)
- call checkval(xi,1.000258953,1.e-6,nerr(4),'optically thin implicit diffusion solution')
- residual = 0.
- if (npart > 0) residual = maxval(abs(vxyzu(4,1:npart)/(3000.*get_cv(0))-1.))
- residual = reduceall_mpi('max',residual)
- call checkval(residual,0.,1.e-12,nerr(5),'diffusion without exchange preserves gas energy')
- call update_test_scores(ntests,nerr,npass)
+    ! Assemble the backwards Euler defect for the gas particle independently.
+    ! The reservoirs have no neighbours inside their own kernels, so lambda=1/3.
+    residual = 0.
+    xi = 0.
+    expected_xi = 0.
+    if (id==master) then
+       xi = rad(iradxi,1)
+       lambda = 1./3.
+       if (limit_radiation_flux) then
+          gradient = 0.
+          do j=2,3
+             r = xyzh(1,j)
+             dW = grkern(r*r,r)*cnormk
+             gradient(1) = gradient(1) - massoftype(igas)*dW*(rho(j)*rad(iradxi,j)-rho(1)*xi)/rho(1)
+          enddo
+          r = get_rad_R(rho(1),xi,gradient,kappa_code)
+          lambda = (2.+r)/(6.+3.*r+r*r)
+       endif
+       residual = xi0-xi
+       numerator = xi0
+       diagonal = 1.
+       do j=2,3
+          r = xyzh(1,j)
+          dW = grkern(r*r,r)*cnormk
+          coeff = -0.5*dt*c_code*massoftype(igas)*dW/(r*rho(1)*rho(j))* &
+                  (lambda/(kappa_code*rho(1)) + 1./(3.*kappa_code*rho(j)))
+          residual = residual + coeff*(rho(j)*rad(iradxi,j)-rho(1)*xi)
+          numerator = numerator + coeff*rho(j)*rad(iradxi,j)
+          diagonal = diagonal + coeff*rho(1)
+       enddo
+       residual = abs(residual)/(diagonal*xi)
+       expected_xi = numerator/diagonal
+       if (limit_radiation_flux) expected_xi = 1.000258953
+    endif
+    residual = reduceall_mpi('max',residual)
+    call checkval(residual,0.,tol_rad,nerr(3),'diffusion backwards Euler defect')
+    xi = reduceall_mpi('max',xi)
+    expected_xi = reduceall_mpi('max',expected_xi)
+    call checkval(xi,expected_xi,1.e-6,nerr(4),'implicit diffusion solution')
+    residual = 0.
+    if (npart > 0) residual = maxval(abs(vxyzu(4,1:npart)/(3000.*get_cv(0))-1.))
+    residual = reduceall_mpi('max',residual)
+    call checkval(residual,0.,1.e-12,nerr(5),'diffusion without exchange preserves gas energy')
+    nerr(6) = 0
+    if (.not.limit_radiation_flux) call checkval(its_global <= 2,.true.,nerr(6),'linear diffusion takes full updates')
+    call update_test_scores(ntests,nerr,npass)
+ enddo
 
  iopacity_type = opacity_prev
  cv_type = cv_prev

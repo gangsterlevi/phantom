@@ -37,6 +37,7 @@ module radiation_implicit
  ! of the loop contending for iterations, while much larger chunks leave threads idle at
  ! the end. A constant, as some compilers (nvfortran) mishandle a chunk size held in a variable
  integer, parameter :: nchunk = 64
+ real, parameter :: max_contraction = 0.94
 
  ! options for Bate & Keto ISM radiative transfer (not working yet)
  logical, parameter :: dustRT = .false.
@@ -86,7 +87,6 @@ real function get_cv_particle(i,rhoi,ui,temperature_guess) result(cv)
  cv = get_cv(cv_type,rhoi,ui)
 
 end function get_cv_particle
-
 
 !---------------------------------------------------------
 !+
@@ -289,10 +289,10 @@ subroutine do_radiation_onestep(dt,time,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,
  integer, intent(out)   :: nit,ierr
  real,    intent(out)   :: maxerrE2,maxerrU2
  real,    intent(inout) :: EU0(:,:)
- integer              :: its,nedges,nslow(npart)
+ integer              :: its,nedges,nslow(npart),nslow_rad
  real                 :: errmax(3)
  real                 :: maxerrE2last,maxerrU2last,maxerrE2last2,maxerrU2last2,omega,maxerrE2prev2,maxerrU2prev2
- real                 :: dUlast(npart)
+ real                 :: dUlast(npart),omega_rad
  real(kind=4)         :: tlast,tcpulast,t1,tcpu1
  character(len=100)   :: warningstr
  logical              :: converged,stop_iterations,damp_oscillations
@@ -306,6 +306,8 @@ subroutine do_radiation_onestep(dt,time,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,
  maxerrE2 = 0.
  maxerrU2 = 0.
  omega = 1.  ! default relaxation parameter (1 is equivalent to the Gauss-Seidel method)
+ omega_rad = 1.
+ nslow_rad = 0
  ierr = 0
 
  call allocate_memory_implicit(npart,radkern,hfact,ierr)
@@ -340,7 +342,7 @@ subroutine do_radiation_onestep(dt,time,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,
  !$omp shared(pdvvisc,dvdx,nucleation,dust_temp,eos_vars,drad,fxyzu,implicit_radiation_store_drad) &
  !$omp shared(exchange_radiation_energy) &
  !$omp shared(converged,stop_iterations,maxerrE2,maxerrU2,maxerrE2last,maxerrU2last,itsmax_rad) &
- !$omp shared(moresweep,tol_rad,iverbose,ierr,errmax) &
+ !$omp shared(moresweep,tol_rad,iverbose,ierr,errmax,omega_rad,nslow_rad) &
  !$omp shared(maxerrE2last2,maxerrU2last2,maxerrE2prev2,maxerrU2prev2,omega,its,dUlast,nslow,damp_oscillations)
  call fill_arrays(ncompact,ncompactlocal,npart,icompactmax,dt,time,&
                   xyzh,vxyzu,ivar,ijvar,rad,radprop,vari,varij,varij2,EU0)
@@ -383,7 +385,7 @@ subroutine do_radiation_onestep(dt,time,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,
     call update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
                                      radprop,rad,origEU,varinew,EU0,&
                                      pdvvisc,dvdx,nucleation,dust_temp,eos_vars,drad,fxyzu,&
-                                     mask,implicit_radiation_store_drad,moresweep,maxerrE2,maxerrU2,omega,&
+                                     mask,implicit_radiation_store_drad,moresweep,maxerrE2,maxerrU2,omega_rad,omega,&
                                      dUlast,nslow,damp_oscillations)
 
     !$omp single
@@ -405,9 +407,17 @@ subroutine do_radiation_onestep(dt,time,npart,rad,xyzh,vxyzu,radprop,origEU,EU0,
     if (maxerrE2 > tol_rad) maxerrE2prev2 = abs(maxerrE2-maxerrE2last2)/maxerrE2
     if (maxerrU2 > tol_rad) maxerrU2prev2 = abs(maxerrU2-maxerrU2last2)/maxerrU2
     if (iverbose >= 2) then
-       print*,'iteration: ',its,' error = ',maxerrE2,maxerrU2,count(mask),'omega = ',omega
+       print*,'iteration: ',its,' error = ',maxerrE2,maxerrU2,count(mask),'omega = ',omega,' omega_rad = ',omega_rad
     endif
     converged = (maxerrE2 <= tol_rad .and. maxerrU2 <= tol_rad)
+    ! Use full radiation updates until two sweeps contract poorly or a cycle is detected.
+    ! Keep half updates for the rest of this solve; the next solve starts at one again.
+    if (maxerrE2 > tol_rad .and. maxerrE2 >= max_contraction*maxerrE2last) then
+       nslow_rad = nslow_rad + 1
+    else
+       nslow_rad = 0
+    endif
+    if (nslow_rad >= 2 .or. maxerrE2prev2 < limitcycletol) omega_rad = 0.5
     maxerrU2last2 = maxerrU2last
     maxerrE2last2 = maxerrE2last
     maxerrU2last = maxerrU2
@@ -776,7 +786,7 @@ end subroutine calc_diffusion_term
 subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
                                        radprop,rad,origEU,varinew,EU0,&
                                        pdvvisc,dvdx,nucleation,dust_temp,eos_vars,drad,fxyzu, &
-                                       mask,store_drad,moresweep,maxerrE2,maxerrU2,omega,dUlast,nslow,damp_oscillations)
+                                       mask,store_drad,moresweep,maxerrE2,maxerrU2,omega_rad,omega,dUlast,nslow,damp_oscillations)
  use, intrinsic :: ieee_arithmetic, only:ieee_is_nan
  use io,      only:fatal,error
  use units,   only:get_radconst_code,get_c_code,unit_density
@@ -788,6 +798,7 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
  real,         intent(in)    :: vari(:,:),varinew(3,npart),rad(:,:),origEU(:,:)
  real(kind=4), intent(in)    :: pdvvisc(:),dvdx(:,:)
  real,         intent(in)    :: eos_vars(:,:)
+ real,         intent(in)    :: omega_rad
  real,         intent(inout) :: drad(:,:),fxyzu(:,:),nucleation(:,:),dust_temp(:)
  real,         intent(inout) :: radprop(:,:),EU0(:,:),omega
  real,         intent(inout) :: dUlast(npart)
@@ -807,7 +818,6 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
  real                :: residualE,residualU,maxerrU2old,Tgas4,Trad4,ck,ack
  real                :: Ei,Ui,cvi,opacityi,eddi
  real                :: maxerrE2i,maxerrU2i,dUi
- real, parameter     :: max_contraction = 0.94
 
  a_code = get_radconst_code()
  c_code = get_c_code()
@@ -1082,8 +1092,8 @@ subroutine update_gas_radiation_energy(ivar,vari,npart,ncompactlocal,&
           mask(i) = .true.
        endif
        !
-       !--Damp the nonlinear radiation update as well as the gas update.
-       if (mask(i)) E1i = 0.5*(Ei + E1i)
+       !--Relax radiation only when convergence stalls. Errors above use the full proposal.
+       if (mask(i)) E1i = Ei + omega_rad*(E1i-Ei)
        !
        !--Copy values
        !
